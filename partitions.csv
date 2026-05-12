@@ -1,0 +1,17 @@
+# Table de partitions pour le système de paiement offline
+# Inclut : NVS chiffré, 2 partitions OTA, stockage données
+#
+# Sécurité :
+#   - nvs_keys : stocke les clés de chiffrement NVS, protégé par flash encryption
+#   - Les partitions app (ota_0, ota_1) sont chiffrées automatiquement
+#   - Le flag "encrypted" sur nvs_keys indique qu'elle est chiffrée en flash
+#
+# Layout : Bootloader 0x1000-0xFFFF (60KB), Partition Table 0x10000
+# Name,    Type, SubType, Offset,   Size,   Flags
+nvs,       data, nvs,     0x11000,  0x6000,
+otadata,   data, ota,     0x17000,  0x2000,
+phy_init,  data, phy,     0x19000,  0x1000,
+ota_0,     app,  ota_0,   0x20000,  0x1C0000,
+ota_1,     app,  ota_1,   0x1E0000, 0x1C0000,
+nvs_keys,  data, nvs_keys,0x3A0000, 0x1000, encrypted
+storage,   data, spiffs,  0x3A1000, 0x5F000,

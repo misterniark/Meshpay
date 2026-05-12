@@ -1,0 +1,6 @@
+## Dépendances gérées par le registre de composants ESP-IDF
+dependencies:
+  espressif/cbor:
+    version: "^0.6.0~2"
+  lvgl/lvgl:
+    version: "~9.2"

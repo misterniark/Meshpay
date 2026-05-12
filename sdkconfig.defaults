@@ -1,0 +1,50 @@
+# Configuration par défaut du projet
+# Système de paiement décentralisé offline
+
+# --- mbedtls : activer PSA Crypto pour Ed25519 ---
+CONFIG_MBEDTLS_ECDSA_C=y
+CONFIG_MBEDTLS_ECP_C=y
+CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
+CONFIG_MBEDTLS_HKDF_C=y
+
+# --- Partition custom (2x OTA 1.75 MB + NVS + SPIFFS) ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- FreeRTOS ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- LVGL ---
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_DRAW_BUF_STRIDE_ALIGN=1
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_LEVEL_WARN=y
+CONFIG_LV_TICK_CUSTOM=y
+
+# ===================================================================
+# SECURITE : Chiffrement flash + NVS chiffre
+# ===================================================================
+#
+# MODE DEVELOPMENT : permet le reflashing via UART sans restriction.
+# Pour la PRODUCTION, remplacer par :
+#   CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y
+#   CONFIG_SECURE_UART_ROM_DL_MODE_DISABLED=y
+#
+# ATTENTION : L'activation brule des eFuses de maniere IRREVERSIBLE.
+# En mode Release, le device ne peut plus etre reflashe en clair.
+# ===================================================================
+
+# --- Chiffrement flash (AES-256, mode developpement) ---
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
+
+# --- Bootloader elargi pour flash encryption ---
+# Le bootloader avec flash encryption depasse 28KB (limite a 0x8000).
+# On repousse la partition table a 0x10000 pour laisser 60KB au bootloader.
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
+
+# --- NVS chiffre (cles protegees par le chiffrement flash) ---
+CONFIG_NVS_ENCRYPTION=y

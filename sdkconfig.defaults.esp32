@@ -1,0 +1,17 @@
+# Configuration spécifique ESP32 (CYD)
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# --- Secure Boot V2 (PRODUCTION UNIQUEMENT) ---
+# Non active par defaut car necessite :
+#   1. Un chip ESP32 revision >= 3.0 (ECO3)
+#   2. CONFIG_ESP32_REV_MIN_3=y
+#   3. Une cle RSA-3072 generee avec :
+#      espsecure.py generate_signing_key --version 2 secure_boot_key.pem
+#   4. Brulage irreversible des eFuses au premier boot
+#
+# Pour activer, decommenter :
+# CONFIG_ESP32_REV_MIN_3=y
+# CONFIG_SECURE_BOOT=y
+# CONFIG_SECURE_BOOT_V2_ENABLED=y
+# CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y

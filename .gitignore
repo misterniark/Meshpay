@@ -1,0 +1,54 @@
+# ==========================================================================
+# MeshPay — .gitignore
+#
+# IMPORTANT : ce fichier liste les ressources qui ne doivent JAMAIS etre
+# commit. Les secrets operationnels (cles privees, configs locales) y sont
+# en premier. Ne pas relacher une regle sans comprendre pourquoi elle est la.
+# ==========================================================================
+
+# --- Secrets & cles privees (I6/I7) -------------------------------------
+# Cles de signature Secure Boot V2 / flash encryption : usage hors arbre
+# source obligatoire en production. Si la cle a deja ete versionnee une
+# fois, elle doit etre consideree compromise et regeneree.
+*.pem
+secure_boot_signing_key*
+flash_encryption_key*
+# Variables d'environnement locales — chaque dev peut y mettre des
+# credentials temporaires, on n'expose jamais .env
+.env
+.env.local
+.env.*.local
+
+# --- Build ESP-IDF -------------------------------------------------------
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.*.bak
+dependencies.lock
+managed_components/
+.cache/
+
+# --- Fichiers generes ----------------------------------------------------
+*.elf
+*.bin
+*.map
+
+# --- IDE / editeurs ------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- Tests / rapports ----------------------------------------------------
+Testing/
+ORPHAN_AUDIT_REPORT.txt
+
+# --- Audits internes ChatGPT (non publics) -------------------------------
+# Documents de revue internes, ne pas exposer sur le depot.
+auditchatgtp.md
+auditusagechatgtp.md
+
+# --- Claude ---------------------------------------------------------------
+.claude/

@@ -1,0 +1,4 @@
+## Dépendances du composant transaction
+dependencies:
+  espressif/cbor:
+    version: "^0.6.0~2"

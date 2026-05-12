@@ -1,0 +1,1184 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Offline Payment - UI Mockup</title>
+<style>
+  /* ============================================================
+   * Variables globales reprenant le theme LVGL du projet
+   * ============================================================ */
+  :root {
+    --bg:        #1a1a2e;
+    --card:      #16213e;
+    --accent:    #0f3460;
+    --accent-hi: #4e9af1;
+    --success:   #27ae60;
+    --warning:   #f39c12;
+    --danger:    #e74c3c;
+    --text:      #ecf0f1;
+    --text-dim:  #7f8c8d;
+    --border:    #2c3e50;
+    --btn-bg:    #2c3e50;
+    --radius:    8px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    background: #0d0d1a;
+    color: var(--text);
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  h1 {
+    text-align: center;
+    margin-bottom: 8px;
+    font-size: 22px;
+    color: var(--accent-hi);
+  }
+  .subtitle {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-bottom: 24px;
+  }
+
+  /* ============================================================
+   * Layout principal : les deux devices cote a cote
+   * ============================================================ */
+  .devices {
+    display: flex;
+    justify-content: center;
+    gap: 60px;
+    flex-wrap: wrap;
+  }
+
+  .device-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .device-label {
+    font-size: 14px;
+    font-weight: bold;
+    color: var(--accent-hi);
+    margin-bottom: 6px;
+  }
+  .device-specs {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+
+  /* ============================================================
+   * Cadre "device" qui simule le boitier physique
+   * ============================================================ */
+  .device-frame {
+    border: 3px solid #333;
+    border-radius: 16px;
+    padding: 12px;
+    background: #111;
+    box-shadow: 0 0 30px rgba(78,154,241,0.1);
+    position: relative;
+  }
+  .device-frame.cyd {
+    width: 356px;
+    height: 288px;
+  }
+  .device-frame.waveshare {
+    width: 208px;
+    height: 368px;
+  }
+
+  /* ============================================================
+   * Ecran interne (zone LVGL)
+   * ============================================================ */
+  .screen {
+    background: var(--bg);
+    overflow: hidden;
+    position: relative;
+    width: 100%;
+    height: 100%;
+    border-radius: var(--radius);
+  }
+  .device-frame.cyd .screen {
+    width: 320px;
+    height: 240px;
+    font-size: 12px;
+  }
+  .device-frame.waveshare .screen {
+    width: 172px;
+    height: 320px;
+    font-size: 10px;
+  }
+
+  /* Chaque "page" d'ecran */
+  .page {
+    display: none;
+    width: 100%;
+    height: 100%;
+    flex-direction: column;
+    position: absolute;
+    top: 0; left: 0;
+  }
+  .page.active { display: flex; }
+
+  /* ============================================================
+   * Header commun
+   * ============================================================ */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 8px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    min-height: 36px;
+    flex-shrink: 0;
+  }
+  .header .title {
+    font-weight: bold;
+    font-size: 1.1em;
+    color: var(--text);
+    flex: 1;
+    text-align: center;
+  }
+
+  /* ============================================================
+   * Boutons
+   * ============================================================ */
+  .btn {
+    background: var(--btn-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 12px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    transition: background 0.15s, transform 0.1s;
+    user-select: none;
+  }
+  .btn:hover { background: #3a5068; }
+  .btn:active { transform: scale(0.96); }
+  .btn.accent { background: var(--accent-hi); color: #fff; border-color: var(--accent-hi); }
+  .btn.accent:hover { background: #3a82d6; }
+  .btn.success { background: var(--success); color: #fff; border-color: var(--success); }
+  .btn.success:hover { background: #219a52; }
+  .btn.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .btn.small { padding: 4px 8px; font-size: 0.9em; }
+  .btn.disabled {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+  .btn-back {
+    background: var(--btn-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px 8px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+  }
+  .btn-back:hover { background: #3a5068; }
+
+  /* ============================================================
+   * Cards
+   * ============================================================ */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px;
+    margin: 3px 6px;
+  }
+  .card.clickable {
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .card.clickable:hover {
+    border-color: var(--accent-hi);
+  }
+
+  /* ============================================================
+   * Content area scrollable
+   * ============================================================ */
+  .content {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 4px;
+  }
+  .content::-webkit-scrollbar { width: 3px; }
+  .content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ============================================================
+   * Utilitaires layout
+   * ============================================================ */
+  .flex-col { display: flex; flex-direction: column; }
+  .flex-row { display: flex; flex-direction: row; }
+  .flex-center { display: flex; align-items: center; justify-content: center; }
+  .flex-between { display: flex; justify-content: space-between; align-items: center; }
+  .flex-wrap { flex-wrap: wrap; }
+  .gap-4 { gap: 4px; }
+  .gap-6 { gap: 6px; }
+  .gap-8 { gap: 8px; }
+  .gap-10 { gap: 10px; }
+  .text-center { text-align: center; }
+  .text-dim { color: var(--text-dim); }
+  .text-accent { color: var(--accent-hi); }
+  .text-success { color: var(--success); }
+  .text-warning { color: var(--warning); }
+  .text-danger { color: var(--danger); }
+  .text-sm { font-size: 0.85em; }
+  .text-lg { font-size: 1.3em; }
+  .text-xl { font-size: 1.8em; }
+  .text-xxl { font-size: 2.4em; }
+  .bold { font-weight: bold; }
+  .mt-4 { margin-top: 4px; }
+  .mt-8 { margin-top: 8px; }
+  .mt-12 { margin-top: 12px; }
+  .mb-4 { margin-bottom: 4px; }
+  .mb-8 { margin-bottom: 8px; }
+  .p-4 { padding: 4px; }
+  .p-8 { padding: 8px; }
+  .w-100 { width: 100%; }
+  .flex-1 { flex: 1; }
+
+  /* ============================================================
+   * Composants specifiques
+   * ============================================================ */
+
+  /* Spinbox */
+  .spinbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-content: center;
+  }
+  .spinbox-value {
+    background: var(--card);
+    border: 2px solid var(--accent-hi);
+    border-radius: var(--radius);
+    padding: 6px 14px;
+    font-size: 1.3em;
+    color: var(--text);
+    min-width: 90px;
+    text-align: center;
+    font-family: inherit;
+  }
+
+  /* Roller */
+  .roller {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2px;
+    text-align: center;
+    overflow: hidden;
+  }
+  .roller-item {
+    padding: 4px 8px;
+    color: var(--text-dim);
+    font-size: 0.9em;
+  }
+  .roller-item.selected {
+    background: var(--accent);
+    color: var(--accent-hi);
+    border-radius: 4px;
+    font-weight: bold;
+  }
+
+  /* Dot indicators (PIN) */
+  .pin-dots {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin: 8px 0;
+  }
+  .dot {
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    border: 2px solid var(--accent-hi);
+    background: transparent;
+    transition: background 0.2s;
+  }
+  .dot.filled { background: var(--accent-hi); }
+
+  /* Numpad grid */
+  .numpad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    padding: 4px 20px;
+  }
+  .numpad .btn {
+    padding: 8px 4px;
+    font-size: 1.1em;
+    text-align: center;
+  }
+
+  /* Textarea */
+  .textarea-mock {
+    background: var(--card);
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: inherit;
+    min-height: 50px;
+    word-wrap: break-word;
+  }
+  .textarea-mock:focus-within { border-color: var(--accent-hi); }
+
+  /* Keyboard mock */
+  .keyboard {
+    display: grid;
+    gap: 2px;
+    padding: 4px;
+    background: var(--card);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .keyboard.large {
+    grid-template-columns: repeat(10, 1fr);
+  }
+  .keyboard.small {
+    grid-template-columns: repeat(8, 1fr);
+  }
+  .key {
+    background: var(--btn-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 5px 2px;
+    text-align: center;
+    font-size: 0.8em;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .key:hover { background: #3a5068; }
+  .key.wide { grid-column: span 2; }
+
+  /* Broadcast alert overlay */
+  .broadcast-overlay {
+    background: var(--warning);
+    color: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    height: 100%;
+    padding: 16px;
+    text-align: center;
+  }
+  .broadcast-overlay .btn {
+    background: var(--bg);
+    color: var(--text);
+    border-color: var(--bg);
+  }
+
+  /* Ledger PIN */
+  .ledger-digits {
+    display: flex;
+    justify-content: space-evenly;
+    padding: 4px 8px;
+  }
+  .ledger-digit {
+    font-size: 1.2em;
+    color: var(--text-dim);
+    width: 24px;
+    text-align: center;
+  }
+  .ledger-digit.active { color: var(--accent-hi); font-weight: bold; }
+  .ledger-digit.done { color: var(--accent-hi); }
+
+  .ledger-big-digit {
+    font-size: 3em;
+    color: var(--accent-hi);
+    text-align: center;
+    font-weight: bold;
+  }
+
+  /* ============================================================
+   * Barre de navigation entre ecrans (sous le device)
+   * ============================================================ */
+  .nav-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 12px;
+    justify-content: center;
+    max-width: 360px;
+  }
+  .nav-btn {
+    background: var(--card);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 7px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 10px;
+    transition: all 0.15s;
+  }
+  .nav-btn:hover { border-color: var(--accent-hi); color: var(--text); }
+  .nav-btn.active {
+    background: var(--accent-hi);
+    color: #fff;
+    border-color: var(--accent-hi);
+  }
+
+  /* TX list item */
+  .tx-item {
+    display: flex;
+    align-items: center;
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+    gap: 6px;
+  }
+  .tx-item:last-child { border-bottom: none; }
+  .tx-type {
+    font-weight: bold;
+    font-size: 0.85em;
+    min-width: 55px;
+  }
+  .tx-amount {
+    flex: 1;
+    text-align: center;
+    font-weight: bold;
+  }
+  .tx-time {
+    color: var(--text-dim);
+    font-size: 0.8em;
+    white-space: nowrap;
+  }
+  .tx-addr {
+    color: var(--text-dim);
+    font-size: 0.75em;
+    padding: 0 6px 2px;
+  }
+
+  /* Settings info row */
+  .info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    font-size: 0.9em;
+  }
+  .info-row .label { color: var(--text-dim); }
+  .info-row .value { color: var(--text); font-weight: bold; }
+
+  /* List item for scan results */
+  .list-item {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9em;
+  }
+  .list-item:last-child { border-bottom: none; }
+
+  /* Peer card large */
+  .peer-alias { font-weight: bold; color: var(--text); }
+  .peer-key { color: var(--text-dim); font-size: 0.8em; margin-top: 2px; }
+</style>
+</head>
+<body>
+
+<h1>Offline Payment - Mockup UI</h1>
+<p class="subtitle">CYD 320x240 (paysage) &nbsp;|&nbsp; Waveshare 172x320 (portrait)</p>
+
+<div class="devices">
+
+  <!-- ============================================================
+       DEVICE 1 : CYD (320x240 paysage)
+       ============================================================ -->
+  <div class="device-wrapper">
+    <div class="device-label">CYD - ESP32</div>
+    <div class="device-specs">ILI9341 + XPT2046 | 320x240 | SPI</div>
+
+    <div class="device-frame cyd">
+      <div class="screen" id="cyd-screen">
+
+        <!-- HOME -->
+        <div class="page active" data-page="home">
+          <div style="padding:12px 16px 4px; display:flex; justify-content:space-between;">
+            <span class="text-dim text-sm">MonDevice</span>
+            <span class="text-dim text-sm">SoleilCoin</span>
+          </div>
+          <div class="flex-center flex-1">
+            <div class="text-center">
+              <div class="text-xxl bold text-accent">1 250.00</div>
+              <div class="text-dim text-sm mt-4">SLC</div>
+            </div>
+          </div>
+          <div style="display:flex; gap:6px; padding:8px 12px; justify-content:space-evenly;">
+            <button class="btn accent" style="flex:1" onclick="navTo('cyd','pay')">Payer</button>
+            <button class="btn" style="flex:1" onclick="navTo('cyd','receive')">Recevoir</button>
+            <button class="btn" style="flex:1" onclick="navTo('cyd','history')">Histo.</button>
+            <button class="btn" style="flex:1" onclick="navTo('cyd','settings')">Param.</button>
+          </div>
+        </div>
+
+        <!-- PAY (peer list) -->
+        <div class="page" data-page="pay">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','home')">&#9664;</button>
+            <span class="title">Payer</span>
+            <button class="btn small" onclick="navTo('cyd','pay-amount')">&#x21bb;</button>
+          </div>
+          <div class="content">
+            <div class="card clickable" onclick="navTo('cyd','pay-amount')">
+              <div class="peer-alias">Alice</div>
+              <div class="peer-key">aabb0102...eeff3031</div>
+            </div>
+            <div class="card clickable" onclick="navTo('cyd','pay-amount')">
+              <div class="peer-alias">Bob</div>
+              <div class="peer-key">ccdd0304...11223344</div>
+            </div>
+            <div class="card clickable" onclick="navTo('cyd','pay-amount')">
+              <div class="peer-alias">Carol</div>
+              <div class="peer-key">eeff0506...55667788</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- PAY (amount) -->
+        <div class="page" data-page="pay-amount">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','pay')">&#9664;</button>
+            <span class="title">Payer</span>
+            <span style="width:32px"></span>
+          </div>
+          <div class="flex-col flex-1" style="padding:8px 16px; justify-content:space-around;">
+            <div class="text-center text-sm">Vers : <span class="bold">Alice</span></div>
+            <div class="text-center text-dim text-sm">Montant :</div>
+            <div class="spinbox">
+              <button class="btn small">&minus;</button>
+              <div class="spinbox-value">000500</div>
+              <button class="btn small">+</button>
+            </div>
+            <div class="flex-between" style="padding:0 16px;">
+              <button class="btn" onclick="navTo('cyd','pay')">Annuler</button>
+              <button class="btn success" onclick="navTo('cyd','home')">Envoyer</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- RECEIVE -->
+        <div class="page" data-page="receive">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','home')">&#9664;</button>
+            <span class="title">Recevoir</span>
+            <span style="width:32px"></span>
+          </div>
+          <div class="flex-col flex-center flex-1 gap-8" style="padding:8px 16px;">
+            <div class="card text-center" style="width:90%; padding:12px;">
+              <div class="text-lg bold mb-4">MonDevice</div>
+              <div class="text-dim text-sm mb-4">Cle publique :</div>
+              <div class="text-accent text-sm" style="word-break:break-all; line-height:1.6;">
+                aabbccdd 11223344<br>55667788 99aabbcc
+              </div>
+            </div>
+            <div class="text-warning text-sm">En attente de paiement...</div>
+          </div>
+        </div>
+
+        <!-- HISTORY -->
+        <div class="page" data-page="history">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','home')">&#9664;</button>
+            <span class="title">Historique</span>
+            <span style="width:32px"></span>
+          </div>
+          <div class="content">
+            <div class="card" style="padding:0; margin-bottom:4px;">
+              <div class="tx-item">
+                <span class="tx-type text-accent">TRANSFER</span>
+                <span class="tx-amount">500</span>
+                <span class="tx-time">il y a 2min</span>
+              </div>
+              <div class="tx-addr">aabb..ccdd &#8594; eeff..1122</div>
+            </div>
+            <div class="card" style="padding:0; margin-bottom:4px;">
+              <div class="tx-item">
+                <span class="tx-type text-success">MINT</span>
+                <span class="tx-amount">1 000</span>
+                <span class="tx-time">il y a 1h</span>
+              </div>
+              <div class="tx-addr">0000..0000 &#8594; aabb..ccdd</div>
+            </div>
+            <div class="card" style="padding:0; margin-bottom:4px;">
+              <div class="tx-item">
+                <span class="tx-type text-accent">TRANSFER</span>
+                <span class="tx-amount">200</span>
+                <span class="tx-time">il y a 3h</span>
+              </div>
+              <div class="tx-addr">eeff..1122 &#8594; aabb..ccdd</div>
+            </div>
+            <div class="card" style="padding:0; margin-bottom:4px;">
+              <div class="tx-item">
+                <span class="tx-type text-accent">TRANSFER</span>
+                <span class="tx-amount">750</span>
+                <span class="tx-time">il y a 5h</span>
+              </div>
+              <div class="tx-addr">aabb..ccdd &#8594; 3344..5566</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div class="page" data-page="settings">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','home')">&#9664;</button>
+            <span class="title">Parametres</span>
+            <span style="width:32px"></span>
+          </div>
+          <div class="content" style="padding:6px;">
+            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+              <div class="card" style="flex:1; min-width:46%;">
+                <div class="bold text-sm mb-4">Info device</div>
+                <div class="info-row"><span class="label">Alias :</span><span class="value">MonDevice</span></div>
+                <div class="info-row"><span class="label">Cle :</span><span class="value text-accent" style="font-size:0.8em">aabb..ccdd</span></div>
+                <div class="info-row"><span class="label">Ecran :</span><span class="value">320x240</span></div>
+              </div>
+              <div class="card" style="flex:1; min-width:46%;">
+                <div class="bold text-sm mb-4">Monnaie</div>
+                <div class="info-row"><span class="label">Nom :</span><span class="value">SoleilCoin</span></div>
+                <div class="info-row"><span class="label">ID :</span><span class="value" style="font-size:0.8em">0x01020304</span></div>
+              </div>
+              <div class="card" style="flex:1; min-width:46%;">
+                <div class="bold text-sm mb-4">Statistiques</div>
+                <div class="info-row"><span class="label">TX :</span><span class="value">42</span></div>
+                <div class="info-row"><span class="label">Forward :</span><span class="value text-success">Actif (5 min)</span></div>
+              </div>
+              <div class="card flex-center" style="flex:1; min-width:46%;">
+                <button class="btn accent" onclick="navTo('cyd','admin')">Admin</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ADMIN -->
+        <div class="page" data-page="admin">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','settings')">&#9664;</button>
+            <span class="title">Admin</span>
+            <span style="width:32px"></span>
+          </div>
+          <div class="content flex-center" style="padding:12px;">
+            <div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:space-evenly; width:100%;">
+              <button class="btn accent" style="width:46%; padding:12px;" onclick="navTo('cyd','mint')">Creer credits</button>
+              <button class="btn accent" style="width:46%; padding:12px;" onclick="navTo('cyd','message')">Broadcast</button>
+              <button class="btn accent" style="width:46%; padding:12px;" onclick="navTo('cyd','scan')">Scanner</button>
+              <button class="btn disabled" style="width:46%; padding:12px;">Renommer device</button>
+              <button class="btn disabled" style="width:46%; padding:12px;">Config. forward</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- MINT -->
+        <div class="page" data-page="mint">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','admin')">&#9664;</button>
+            <span class="title">Creer credits</span>
+            <span style="width:32px"></span>
+          </div>
+          <div class="flex-col flex-1 gap-6" style="padding:8px 24px; align-items:center; justify-content:center;">
+            <div class="text-dim text-sm">Destinataire :</div>
+            <div class="roller" style="width:80%;">
+              <div class="roller-item">Alice (AABB)</div>
+              <div class="roller-item selected">Bob (CCDD)</div>
+              <div class="roller-item">Carol (EEFF)</div>
+            </div>
+            <div class="text-dim text-sm">Montant :</div>
+            <div class="roller" style="width:50%;">
+              <div class="roller-item">200</div>
+              <div class="roller-item selected">500</div>
+              <div class="roller-item">1 000</div>
+            </div>
+            <button class="btn success" style="padding:8px 32px;" onclick="navTo('cyd','admin')">Creer</button>
+          </div>
+        </div>
+
+        <!-- MESSAGE (compose) -->
+        <div class="page" data-page="message">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','admin')">&#9664;</button>
+            <span class="title">Broadcast</span>
+            <span style="width:32px"></span>
+          </div>
+          <div style="padding:6px 8px;">
+            <div class="textarea-mock" style="min-height:60px; font-size:0.95em;">
+              Fermeture exceptionnelle a 18h aujourd'hui. Merci de finaliser vos echanges.
+            </div>
+          </div>
+          <div class="flex-between" style="padding:2px 10px;">
+            <span class="text-dim text-sm">82/157</span>
+            <button class="btn accent small" onclick="navTo('cyd','admin')">Envoyer</button>
+          </div>
+          <div style="flex:1;"></div>
+          <div class="keyboard large">
+            <div class="key">a</div><div class="key">z</div><div class="key">e</div>
+            <div class="key">r</div><div class="key">t</div><div class="key">y</div>
+            <div class="key">u</div><div class="key">i</div><div class="key">o</div>
+            <div class="key">p</div>
+            <div class="key">q</div><div class="key">s</div><div class="key">d</div>
+            <div class="key">f</div><div class="key">g</div><div class="key">h</div>
+            <div class="key">j</div><div class="key">k</div><div class="key">l</div>
+            <div class="key">m</div>
+            <div class="key wide">&#x21e7;</div><div class="key">w</div><div class="key">x</div>
+            <div class="key">c</div><div class="key">v</div><div class="key">b</div>
+            <div class="key">n</div><div class="key wide">&#9003;</div>
+            <div class="key wide">123</div>
+            <div class="key" style="grid-column: span 5;">espace</div>
+            <div class="key wide">&#x23ce;</div>
+          </div>
+        </div>
+
+        <!-- SCAN -->
+        <div class="page" data-page="scan">
+          <div class="header">
+            <button class="btn-back" onclick="navTo('cyd','admin')">&#9664;</button>
+            <span class="title">Scanner</span>
+            <span style="width:32px"></span>
+          </div>
+          <div style="padding:8px; text-align:center;">
+            <button class="btn accent" style="width:50%; padding:8px;">Scanner</button>
+          </div>
+          <div class="content" style="padding:4px 8px;">
+            <div class="card" style="padding:0;">
+              <div class="list-item">Alice &nbsp;&nbsp;<span class="text-dim">(AABB..CCDD)</span></div>
+              <div class="list-item">Bob &nbsp;&nbsp;<span class="text-dim">(EEFF..1122)</span></div>
+              <div class="list-item">Carol &nbsp;&nbsp;<span class="text-dim">(3344..5566)</span></div>
+              <div class="list-item">David &nbsp;&nbsp;<span class="text-dim">(7788..99AA)</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SETUP -->
+        <div class="page" data-page="setup">
+          <div class="flex-col flex-center flex-1 gap-10" style="padding:20px;">
+            <div class="text-lg bold">Offline Payment</div>
+            <div class="text-accent">SoleilCoin</div>
+            <div class="text-dim text-sm text-center" style="line-height:1.6; width:80%;">
+              Bienvenue ! Configurez votre code PIN pour securiser vos transactions.
+            </div>
+            <button class="btn accent" style="padding:10px 32px;" onclick="navTo('cyd','pin')">Configurer PIN</button>
+          </div>
+        </div>
+
+        <!-- PIN NUMPAD -->
+        <div class="page" data-page="pin">
+          <div class="flex-col flex-center flex-1 gap-6" style="padding:8px;">
+            <div class="bold">Nouveau PIN</div>
+            <div class="pin-dots">
+              <div class="dot filled"></div>
+              <div class="dot filled"></div>
+              <div class="dot"></div>
+              <div class="dot"></div>
+            </div>
+            <div class="numpad">
+              <button class="btn">1</button><button class="btn">2</button><button class="btn">3</button>
+              <button class="btn">4</button><button class="btn">5</button><button class="btn">6</button>
+              <button class="btn">7</button><button class="btn">8</button><button class="btn">9</button>
+              <button class="btn">C</button><button class="btn">0</button><button class="btn">&#9003;</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- BROADCAST (alert overlay) -->
+        <div class="page" data-page="broadcast">
+          <div class="broadcast-overlay">
+            <div class="text-lg bold">&#9888; Broadcast</div>
+            <div style="font-size:1.1em; line-height:1.6; padding:0 12px;">
+              Fermeture exceptionnelle a 18h aujourd'hui. Merci de finaliser vos echanges.
+            </div>
+            <button class="btn" style="padding:8px 28px;" onclick="navTo('cyd','home')">Fermer</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Navigation buttons -->
+    <div class="nav-bar" id="cyd-nav"></div>
+  </div>
+
+  <!-- ============================================================
+       DEVICE 2 : WAVESHARE (172x320 portrait)
+       ============================================================ -->
+  <div class="device-wrapper">
+    <div class="device-label">Waveshare - ESP32-S3</div>
+    <div class="device-specs">JD9853 + AXS5106L | 172x320 | SPI+I2C</div>
+
+    <div class="device-frame waveshare">
+      <div class="screen" id="ws-screen">
+
+        <!-- HOME -->
+        <div class="page active" data-page="home">
+          <div style="padding:10px 8px 2px;">
+            <div class="text-dim" style="font-size:9px;">MonDevice</div>
+            <div class="text-dim" style="font-size:9px;">SoleilCoin</div>
+          </div>
+          <div class="flex-center flex-1">
+            <div class="text-center">
+              <div class="text-xl bold text-accent">1 250.00</div>
+              <div class="text-dim" style="font-size:8px; margin-top:4px;">SLC</div>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px; padding:6px;">
+            <button class="btn accent small" onclick="navTo('ws','pay')">Payer</button>
+            <button class="btn small" onclick="navTo('ws','receive')">Recevoir</button>
+            <button class="btn small" onclick="navTo('ws','history')">Histo.</button>
+            <button class="btn small" onclick="navTo('ws','settings')">Param.</button>
+          </div>
+        </div>
+
+        <!-- PAY (list) -->
+        <div class="page" data-page="pay">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','home')">&#9664;</button>
+            <span class="title" style="font-size:0.95em;">Payer</span>
+            <button class="btn small" style="padding:2px 6px; font-size:0.8em;" onclick="navTo('ws','pay-amount')">&#x21bb;</button>
+          </div>
+          <div class="content">
+            <div class="card clickable" style="padding:6px; margin:2px 4px;" onclick="navTo('ws','pay-amount')">
+              <div class="peer-alias" style="font-size:0.9em;">Alice</div>
+            </div>
+            <div class="card clickable" style="padding:6px; margin:2px 4px;" onclick="navTo('ws','pay-amount')">
+              <div class="peer-alias" style="font-size:0.9em;">Bob</div>
+            </div>
+            <div class="card clickable" style="padding:6px; margin:2px 4px;" onclick="navTo('ws','pay-amount')">
+              <div class="peer-alias" style="font-size:0.9em;">Carol</div>
+            </div>
+            <div class="card clickable" style="padding:6px; margin:2px 4px;" onclick="navTo('ws','pay-amount')">
+              <div class="peer-alias" style="font-size:0.9em;">David</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- PAY (amount) -->
+        <div class="page" data-page="pay-amount">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','pay')">&#9664;</button>
+            <span class="title" style="font-size:0.95em;">Payer</span>
+            <span style="width:24px;"></span>
+          </div>
+          <div class="flex-col flex-1" style="padding:8px; justify-content:space-around; align-items:center;">
+            <div class="text-sm">Vers : <span class="bold">Alice</span></div>
+            <div class="text-dim" style="font-size:0.85em;">Montant :</div>
+            <div class="spinbox">
+              <button class="btn small" style="padding:4px 6px;">&minus;</button>
+              <div class="spinbox-value" style="font-size:1em; min-width:70px; padding:4px 8px;">000500</div>
+              <button class="btn small" style="padding:4px 6px;">+</button>
+            </div>
+            <div class="flex-between w-100" style="padding:0 4px;">
+              <button class="btn small" onclick="navTo('ws','pay')">Annuler</button>
+              <button class="btn success small" onclick="navTo('ws','home')">Envoyer</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- RECEIVE -->
+        <div class="page" data-page="receive">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','home')">&#9664;</button>
+            <span class="title" style="font-size:0.95em;">Recevoir</span>
+            <span style="width:24px;"></span>
+          </div>
+          <div class="flex-col flex-center flex-1 gap-8" style="padding:8px;">
+            <div class="card text-center" style="width:95%; padding:10px;">
+              <div class="bold mb-4">MonDevice</div>
+              <div class="text-dim" style="font-size:0.8em;">Cle publique :</div>
+              <div class="text-accent mt-4" style="font-size:0.75em; word-break:break-all; line-height:1.5;">
+                AABBCC...<br>...DDEEFF
+              </div>
+            </div>
+            <div class="text-warning" style="font-size:0.8em; text-align:center; line-height:1.4;">
+              En attente de<br>paiement...
+            </div>
+          </div>
+        </div>
+
+        <!-- HISTORY -->
+        <div class="page" data-page="history">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','home')">&#9664;</button>
+            <span class="title" style="font-size:0.95em;">Historique</span>
+            <span style="width:24px;"></span>
+          </div>
+          <div class="content">
+            <div class="tx-item" style="font-size:0.8em;">
+              <span class="tx-type text-accent" style="min-width:40px;">TRSF</span>
+              <span class="tx-amount">500</span>
+              <span class="tx-time">2min</span>
+            </div>
+            <div class="tx-item" style="font-size:0.8em;">
+              <span class="tx-type text-success" style="min-width:40px;">MINT</span>
+              <span class="tx-amount">1000</span>
+              <span class="tx-time">1h</span>
+            </div>
+            <div class="tx-item" style="font-size:0.8em;">
+              <span class="tx-type text-accent" style="min-width:40px;">TRSF</span>
+              <span class="tx-amount">200</span>
+              <span class="tx-time">3h</span>
+            </div>
+            <div class="tx-item" style="font-size:0.8em;">
+              <span class="tx-type text-accent" style="min-width:40px;">TRSF</span>
+              <span class="tx-amount">750</span>
+              <span class="tx-time">5h</span>
+            </div>
+            <div class="tx-item" style="font-size:0.8em;">
+              <span class="tx-type text-success" style="min-width:40px;">MINT</span>
+              <span class="tx-amount">5000</span>
+              <span class="tx-time">1j</span>
+            </div>
+            <div class="tx-item" style="font-size:0.8em;">
+              <span class="tx-type text-accent" style="min-width:40px;">TRSF</span>
+              <span class="tx-amount">100</span>
+              <span class="tx-time">2j</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div class="page" data-page="settings">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','home')">&#9664;</button>
+            <span class="title" style="font-size:0.95em;">Parametres</span>
+            <span style="width:24px;"></span>
+          </div>
+          <div class="content" style="padding:4px;">
+            <div class="card" style="margin:2px 3px; padding:6px;">
+              <div class="bold" style="font-size:0.85em; margin-bottom:3px;">Info device</div>
+              <div class="info-row" style="font-size:0.8em;"><span class="label">Alias :</span><span class="value">MonDevice</span></div>
+              <div class="info-row" style="font-size:0.8em;"><span class="label">Cle :</span><span class="value text-accent">aabb..dd</span></div>
+              <div class="info-row" style="font-size:0.8em;"><span class="label">Ecran :</span><span class="value">172x320</span></div>
+            </div>
+            <div class="card" style="margin:2px 3px; padding:6px;">
+              <div class="bold" style="font-size:0.85em; margin-bottom:3px;">Monnaie</div>
+              <div class="info-row" style="font-size:0.8em;"><span class="label">Nom :</span><span class="value">SoleilCoin</span></div>
+              <div class="info-row" style="font-size:0.8em;"><span class="label">ID :</span><span class="value">0x0102</span></div>
+            </div>
+            <div class="card" style="margin:2px 3px; padding:6px;">
+              <div class="bold" style="font-size:0.85em; margin-bottom:3px;">Stats</div>
+              <div class="info-row" style="font-size:0.8em;"><span class="label">TX :</span><span class="value">42</span></div>
+              <div class="info-row" style="font-size:0.8em;"><span class="label">Fwd :</span><span class="value text-success">Actif</span></div>
+            </div>
+            <div style="padding:4px 3px;">
+              <button class="btn accent small w-100" onclick="navTo('ws','admin')">Admin</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ADMIN -->
+        <div class="page" data-page="admin">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','settings')">&#9664;</button>
+            <span class="title" style="font-size:0.95em;">Admin</span>
+            <span style="width:24px;"></span>
+          </div>
+          <div class="content flex-col gap-6" style="padding:8px;">
+            <button class="btn accent small w-100" onclick="navTo('ws','mint')">Creer credits</button>
+            <button class="btn accent small w-100" onclick="navTo('ws','message')">Broadcast</button>
+            <button class="btn accent small w-100" onclick="navTo('ws','scan')">Scanner</button>
+            <button class="btn disabled small w-100">Renommer device</button>
+            <button class="btn disabled small w-100">Config. forward</button>
+          </div>
+        </div>
+
+        <!-- MINT -->
+        <div class="page" data-page="mint">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','admin')">&#9664;</button>
+            <span class="title" style="font-size:0.9em;">Creer credits</span>
+            <span style="width:24px;"></span>
+          </div>
+          <div class="flex-col flex-1 gap-6" style="padding:6px; align-items:center; justify-content:center;">
+            <div class="text-dim" style="font-size:0.85em;">Destinataire :</div>
+            <div class="roller" style="width:90%;">
+              <div class="roller-item" style="font-size:0.8em;">Alice (AA)</div>
+              <div class="roller-item selected" style="font-size:0.8em;">Bob (CC)</div>
+            </div>
+            <div class="text-dim" style="font-size:0.85em;">Montant :</div>
+            <div class="roller" style="width:60%;">
+              <div class="roller-item" style="font-size:0.8em;">200</div>
+              <div class="roller-item selected" style="font-size:0.8em;">500</div>
+              <div class="roller-item" style="font-size:0.8em;">1000</div>
+            </div>
+            <button class="btn success small" style="padding:6px 24px;" onclick="navTo('ws','admin')">Creer</button>
+          </div>
+        </div>
+
+        <!-- MESSAGE -->
+        <div class="page" data-page="message">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','admin')">&#9664;</button>
+            <span class="title" style="font-size:0.9em;">Broadcast</span>
+            <span style="width:24px;"></span>
+          </div>
+          <div style="padding:4px;">
+            <div class="textarea-mock" style="min-height:45px; font-size:0.8em;">
+              Fermeture a 18h
+            </div>
+          </div>
+          <div class="flex-between" style="padding:2px 6px;">
+            <span class="text-dim" style="font-size:0.7em;">16/157</span>
+            <button class="btn accent" style="font-size:0.7em; padding:2px 8px;" onclick="navTo('ws','admin')">Envoyer</button>
+          </div>
+          <div style="flex:1;"></div>
+          <div class="keyboard small">
+            <div class="key">a</div><div class="key">z</div><div class="key">e</div><div class="key">r</div>
+            <div class="key">t</div><div class="key">y</div><div class="key">u</div><div class="key">i</div>
+            <div class="key">o</div><div class="key">p</div><div class="key">q</div><div class="key">s</div>
+            <div class="key">d</div><div class="key">f</div><div class="key">g</div><div class="key">h</div>
+            <div class="key">j</div><div class="key">k</div><div class="key">l</div><div class="key">m</div>
+            <div class="key">w</div><div class="key">x</div><div class="key">c</div><div class="key">v</div>
+            <div class="key wide">&#x21e7;</div><div class="key">b</div><div class="key">n</div>
+            <div class="key wide">&#9003;</div>
+            <div class="key">123</div>
+            <div class="key" style="grid-column:span 4;">espace</div>
+            <div class="key wide">&#x23ce;</div>
+          </div>
+        </div>
+
+        <!-- SCAN -->
+        <div class="page" data-page="scan">
+          <div class="header" style="min-height:30px; padding:2px 4px;">
+            <button class="btn-back" style="font-size:0.8em; padding:2px 6px;" onclick="navTo('ws','admin')">&#9664;</button>
+            <span class="title" style="font-size:0.95em;">Scanner</span>
+            <span style="width:24px;"></span>
+          </div>
+          <div style="padding:6px; text-align:center;">
+            <button class="btn accent small" style="width:80%;">Scanner</button>
+          </div>
+          <div class="content" style="padding:4px;">
+            <div class="card" style="padding:0; margin:0 2px;">
+              <div class="list-item" style="font-size:0.8em;">Alice <span class="text-dim">(AA..CC)</span></div>
+              <div class="list-item" style="font-size:0.8em;">Bob <span class="text-dim">(EE..11)</span></div>
+              <div class="list-item" style="font-size:0.8em;">Carol <span class="text-dim">(33..55)</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SETUP -->
+        <div class="page" data-page="setup">
+          <div class="flex-col flex-center flex-1 gap-8" style="padding:12px;">
+            <div class="bold">Offline Payment</div>
+            <div class="text-accent text-sm">SoleilCoin</div>
+            <div class="text-dim text-center" style="font-size:0.8em; line-height:1.5; width:95%;">
+              Bienvenue ! Configurez votre code PIN pour securiser vos transactions.
+            </div>
+            <button class="btn accent small" style="width:85%; padding:8px;" onclick="navTo('ws','pin')">Configurer PIN</button>
+          </div>
+        </div>
+
+        <!-- PIN LEDGER -->
+        <div class="page" data-page="pin">
+          <div class="flex-col flex-1" style="padding:8px; justify-content:space-between; align-items:center;">
+            <div class="bold text-sm">Nouveau PIN</div>
+            <div class="ledger-digits">
+              <div class="ledger-digit done">&#8226;</div>
+              <div class="ledger-digit done">&#8226;</div>
+              <div class="ledger-digit active">5</div>
+              <div class="ledger-digit">-</div>
+            </div>
+            <button class="btn" style="width:80%; padding:12px; font-size:1.4em;">&#9650;</button>
+            <div class="ledger-big-digit">5</div>
+            <button class="btn accent" style="width:80%; padding:8px; font-size:1.2em;">&#10003;</button>
+            <button class="btn" style="width:80%; padding:12px; font-size:1.4em;">&#9660;</button>
+          </div>
+        </div>
+
+        <!-- BROADCAST (alert) -->
+        <div class="page" data-page="broadcast">
+          <div class="broadcast-overlay" style="padding:12px;">
+            <div class="bold" style="font-size:1.1em;">&#9888; Broadcast</div>
+            <div style="font-size:0.9em; line-height:1.5; padding:0 4px;">
+              Fermeture exceptionnelle a 18h. Merci de finaliser vos echanges.
+            </div>
+            <button class="btn" style="width:60%; padding:6px;" onclick="navTo('ws','home')">Fermer</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Navigation buttons -->
+    <div class="nav-bar" id="ws-nav"></div>
+  </div>
+
+</div>
+
+<script>
+  /* ============================================================
+   * Navigation entre les pages d'un device
+   * ============================================================ */
+  const pages = [
+    { id: 'home',       label: 'Home' },
+    { id: 'pay',        label: 'Payer' },
+    { id: 'pay-amount', label: 'Montant' },
+    { id: 'receive',    label: 'Recevoir' },
+    { id: 'history',    label: 'Historique' },
+    { id: 'settings',   label: 'Parametres' },
+    { id: 'admin',      label: 'Admin' },
+    { id: 'mint',       label: 'Mint' },
+    { id: 'message',    label: 'Message' },
+    { id: 'scan',       label: 'Scan' },
+    { id: 'setup',      label: 'Setup' },
+    { id: 'pin',        label: 'PIN' },
+    { id: 'broadcast',  label: 'Broadcast' },
+  ];
+
+  /**
+   * Initialise la barre de navigation sous chaque device.
+   * Cree un bouton par page.
+   */
+  function initNav(deviceId, navId) {
+    const nav = document.getElementById(navId);
+    pages.forEach(p => {
+      const btn = document.createElement('button');
+      btn.className = 'nav-btn' + (p.id === 'home' ? ' active' : '');
+      btn.textContent = p.label;
+      btn.dataset.page = p.id;
+      btn.onclick = () => navTo(deviceId, p.id);
+      nav.appendChild(btn);
+    });
+  }
+
+  /**
+   * Navigue vers une page donnee sur un device.
+   * Gere l'affichage de la page active et la mise a jour
+   * des boutons de navigation.
+   */
+  function navTo(device, pageId) {
+    const screenId = device === 'cyd' ? 'cyd-screen' : 'ws-screen';
+    const navId    = device === 'cyd' ? 'cyd-nav'    : 'ws-nav';
+    const screen   = document.getElementById(screenId);
+    const nav      = document.getElementById(navId);
+
+    /* Masquer toutes les pages, afficher la cible */
+    screen.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    const target = screen.querySelector(`.page[data-page="${pageId}"]`);
+    if (target) target.classList.add('active');
+
+    /* Mettre a jour les boutons de nav */
+    nav.querySelectorAll('.nav-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.page === pageId);
+    });
+  }
+
+  /* Initialiser les barres de navigation des deux devices */
+  initNav('cyd', 'cyd-nav');
+  initNav('ws',  'ws-nav');
+</script>
+
+</body>
+</html>
