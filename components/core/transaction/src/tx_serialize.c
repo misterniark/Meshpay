@@ -31,10 +31,8 @@
 #include <string.h>
 #include <stdint.h>
 
-/* Clés CBOR supplémentaires pour la sérialisation complète */
-#define CBOR_KEY_ID        7
-#define CBOR_KEY_SIGNATURE 8
-#define CBOR_KEY_STATUS    9
+/* Toutes les clés CBOR (signable et enveloppe complète) sont définies
+ * dans tx_types.h afin de garder un mapping centralisé. */
 
 /**
  * @brief Encode les champs "signables" dans un encoder CBOR existant.

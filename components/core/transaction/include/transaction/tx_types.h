@@ -7,7 +7,10 @@
  * deux devices ou une création de crédits par un device maître (MINT).
  *
  * Contrainte majeure : la transaction sérialisée en CBOR doit tenir
- * dans 250 octets (payload max ESP-NOW).
+ * dans 320 octets (TX_CBOR_MAX_SIZE). ESP-NOW V1 plafonnait à 250 octets ;
+ * le projet utilise ESP-NOW V2, ce qui a permis de monter à 320 depuis le
+ * Lot E.1bis afin d'accommoder le champ `seq` ajouté pour l'anti
+ * double-dépense [I3-fix].
  */
 
 #ifndef TX_TYPES_H
@@ -18,7 +21,8 @@
 
 /**
  * Nombre maximum de parents par transaction dans le DAG.
- * Limité à 2 pour respecter la contrainte de 250 octets en CBOR :
+ * Limité à 2 pour respecter la contrainte de 320 octets en CBOR
+ * (TX_CBOR_MAX_SIZE, ESP-NOW V2 depuis Lot E.1bis ; auparavant 250 en V1) :
  * chaque parent coûte 32 octets (hash SHA-256).
  */
 #define TX_MAX_PARENTS 2
@@ -28,7 +32,8 @@
  *
  * On utilise des clés numériques (entiers) au lieu de chaînes de caractères
  * pour minimiser la taille sérialisée. Avec des clés texte ("id", "type"...),
- * on dépasserait les 250 octets. Les entiers ne coûtent qu'1 octet chacun en CBOR.
+ * on dépasserait les 320 octets (TX_CBOR_MAX_SIZE, ESP-NOW V2 depuis Lot E.1bis,
+ * 250 octets sous ESP-NOW V1). Les entiers ne coûtent qu'1 octet chacun en CBOR.
  */
 #define CBOR_KEY_TYPE       1
 #define CBOR_KEY_FROM       2
@@ -36,6 +41,16 @@
 #define CBOR_KEY_AMOUNT     4
 #define CBOR_KEY_PARENTS    5
 #define CBOR_KEY_TIMESTAMP  6
+/*
+ * Clés 7-9 : champs de l'enveloppe complète UNIQUEMENT.
+ * Elles ne font pas partie du payload signable (cf. tx_serialize_signable) :
+ * la signature et le statut sont posés après calcul du hash, et l'id est
+ * justement ce hash. On les regroupe ici pour garder une vue unique du
+ * mapping CBOR, mais elles sont absentes du buffer hashé.
+ */
+#define CBOR_KEY_ID         7
+#define CBOR_KEY_SIGNATURE  8
+#define CBOR_KEY_STATUS     9
 #define CBOR_KEY_CURRENCY   10
 #define CBOR_KEY_FEE        11
 /* [I3-fix] Nonce monotone par emetteur, pour la detection des conflits
@@ -65,8 +80,9 @@ typedef enum {
  *
  * Taille mémoire estimée : ~233 octets (sans padding).
  *
- * Pour la sérialisation CBOR (contrainte 250 octets ESP-NOW), seuls
- * les champs "signable" sont sérialisés (tout sauf id et signature).
+ * Pour la sérialisation CBOR (contrainte 320 octets ESP-NOW V2 depuis
+ * Lot E.1bis, héritage de 250 octets sous ESP-NOW V1), seuls les champs
+ * "signable" sont sérialisés (tout sauf id et signature).
  * Le hash (id) et la signature sont calculés sur ce contenu sérialisé.
  */
 typedef struct {
