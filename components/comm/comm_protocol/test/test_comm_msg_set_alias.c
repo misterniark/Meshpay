@@ -13,8 +13,6 @@
 #include "crypto/crypto_sign.h"
 #include <string.h>
 
-void setUp(void) {}
-void tearDown(void) {}
 
 /* ================================================================
  * Helpers

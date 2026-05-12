@@ -78,8 +78,6 @@ static transaction_t make_mint(uint32_t amount, uint32_t currency_id)
     return tx;
 }
 
-void setUp(void) {}
-void tearDown(void) {}
 
 /* ================================================================
  * Tests Rules

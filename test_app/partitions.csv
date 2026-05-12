@@ -1,0 +1,10 @@
+# Mesh Pay Test App — Layout partitions minimal.
+#
+# Pas d'OTA, pas de NVS chiffree (les tests qui veulent NVS chiffree
+# l'instancient eux-memes dans un namespace dedie). Une seule partition
+# `factory` pour l'app de test, partition `nvs` pour les tests storage.
+#
+# Name,   Type, SubType, Offset,  Size,    Flags
+nvs,      data, nvs,     0x9000,  0x6000
+phy_init, data, phy,     0xf000,  0x1000
+factory,  app,  factory, 0x10000, 0x300000

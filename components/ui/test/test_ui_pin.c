@@ -22,12 +22,12 @@
 /** Instance mock du stockage, réinitialisée entre chaque test */
 static hal_storage_t s_storage;
 
-void setUp(void)
+__attribute__((weak)) void setUp(void)
 {
     hal_storage_mock_create(&s_storage);
 }
 
-void tearDown(void)
+__attribute__((weak)) void tearDown(void)
 {
     hal_storage_mock_reset(&s_storage);
 }

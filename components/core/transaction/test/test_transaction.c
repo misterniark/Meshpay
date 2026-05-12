@@ -217,6 +217,9 @@ TEST_CASE("serialize_taille_max_250_octets", "[transaction]")
     crypto_generate_keypair(&bob);
 
     hash_t parents[2];
+    /* Lot E.1bis (mai 2026) : TX_CBOR_MAX_SIZE bumpe a 320 octets pour
+     * absorber le champ `seq` ajoute au Lot B. ESP-NOW V2 supporte
+     * largement cette taille (jusqu'a 1490 octets de payload utile). */
     make_dummy_hash(&parents[0], 0xEE);
     make_dummy_hash(&parents[1], 0xFF);
 
@@ -227,7 +230,6 @@ TEST_CASE("serialize_taille_max_250_octets", "[transaction]")
     size_t len = 0;
     esp_err_t err = tx_serialize_full(&tx, buffer, sizeof(buffer), &len);
 
-    /* La sérialisation doit réussir et tenir dans 250 octets */
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_LESS_OR_EQUAL(TX_CBOR_MAX_SIZE, len);
 }

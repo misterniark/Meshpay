@@ -11,7 +11,17 @@
  * Les clés CBOR sont numériques (pas de chaînes) pour minimiser la taille.
  * Voir CBOR_KEY_* dans tx_types.h pour le mapping.
  *
- * Contrainte : la sérialisation complète doit tenir dans 250 octets.
+ * Contrainte : la sérialisation complète doit tenir dans TX_CBOR_MAX_SIZE
+ * octets. Cette limite est calee sur la taille de payload utile en ESP-NOW
+ * V2 (depuis ESP-IDF 4.4, jusqu'a 1490 octets), avec une marge pour le
+ * pire cas pathologique mesure (transfer 2 parents + montant 999999 +
+ * expiration UINT64_MAX ~= 301 octets).
+ *
+ * Historique :
+ *   - Avant Lot B : 250 octets (ESP-NOW V1 strict).
+ *   - Lot E.1bis  : 320 octets. L'ajout du champ `seq` (Lot B) a pousse
+ *     le pire cas au-dela de 250 ; on remonte le plafond a 320 plutot
+ *     que de compacter le wire format.
  */
 
 #ifndef TX_SERIALIZE_H
@@ -21,8 +31,9 @@
 #include "esp_err.h"
 #include <stddef.h>
 
-/** Taille maximale d'une transaction sérialisée en CBOR (contrainte ESP-NOW) */
-#define TX_CBOR_MAX_SIZE 250
+/** Taille maximale d'une transaction sérialisée en CBOR.
+ *  Voir le commentaire de tete pour la justification du choix 320. */
+#define TX_CBOR_MAX_SIZE 320
 
 /**
  * @brief Sérialise les champs "signables" d'une transaction en CBOR.

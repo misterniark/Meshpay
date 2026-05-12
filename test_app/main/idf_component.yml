@@ -1,0 +1,8 @@
+## Test App — dependances IDF Component Manager.
+## Repris a l'identique du firmware principal pour que les composants
+## qui les requirent (ui→lvgl, transaction→cbor) compilent dans le test_app.
+dependencies:
+  espressif/cbor:
+    version: "^0.6.0~2"
+  lvgl/lvgl:
+    version: "~9.2"

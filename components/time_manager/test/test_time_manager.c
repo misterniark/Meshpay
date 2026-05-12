@@ -31,13 +31,13 @@ static void make_key(public_key_t *key, uint8_t fill)
 /* Instance partagée */
 static time_manager_t s_tm;
 
-void setUp(void)
+__attribute__((weak)) void setUp(void)
 {
     s_mock_monotonic = 0;
     memset(&s_tm, 0, sizeof(s_tm));
 }
 
-void tearDown(void)
+__attribute__((weak)) void tearDown(void)
 {
 }
 
@@ -182,15 +182,24 @@ TEST_CASE("master_delta_too_large_rejected", "[time_manager]")
     };
     time_manager_init(&s_tm, &cfg);
 
-    /* Premier maître : accepté */
+    /* Premier maitre : accepte. Offset = 100000 - 10000 = 90000. */
     s_mock_monotonic = 10000;
     public_key_t master_a;
     make_key(&master_a, 0xAA);
     time_manager_on_master_sync(&s_tm, &master_a, 100000, 10);
 
-    /* Deuxième sync du même maître mais avec un delta > 1h */
+    /* Lot E.1bis : l'ancien test calculait bad_time =
+     * 100000 + TIME_MASTER_MAX_DELTA_MS + 1 sans tenir compte du fait
+     * que le monotonic avance entre les deux syncs. Le delta interne
+     * est en realite |master_timestamp - (local_now + offset)|, donc
+     * il faut viser au-dela de current_wall + MAX_DELTA.
+     *
+     * Avec local_now=11000 et offset=90000 -> current_wall=101000.
+     * On envoie current_wall + MAX_DELTA + 10 pour etre certain
+     * d'etre au-dela du seuil. */
     s_mock_monotonic = 11000;
-    uint64_t bad_time = 100000 + TIME_MASTER_MAX_DELTA_MS + 1;
+    int64_t current_wall = 11000 + 90000; /* = 101000 */
+    uint64_t bad_time = (uint64_t)current_wall + TIME_MASTER_MAX_DELTA_MS + 10;
     int ret = time_manager_on_master_sync(&s_tm, &master_a, bad_time, 20);
     TEST_ASSERT_EQUAL(-1, ret);
 }

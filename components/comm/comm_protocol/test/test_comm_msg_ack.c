@@ -12,8 +12,6 @@
 #include "comm/comm_msg.h"
 #include <string.h>
 
-void setUp(void) {}
-void tearDown(void) {}
 
 /* ================================================================
  * Helpers -- donnees de test

@@ -1,0 +1,60 @@
+# Mesh Pay Test App — Configuration commune
+#
+# Cible esp32s3 par defaut (carte de dev actuellement connectee).
+# Pour basculer sur ESP32 CYD :
+#   rm test_app/sdkconfig && idf.py -C test_app set-target esp32
+
+# --- Console USB-OTG natif (Waveshare ESP32-S3-Touch-LCD-1.47) ---
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# --- Flash 16 MB + PSRAM octal 80 MHz (Waveshare 1.47") ---
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# --- Stack des taches IDLE/main pour les tests (Unity utilise du stack) ---
+# 80 KB : les tests DAG/wallet allouent un `dag_t` sur la stack (250 TX
+# x ~250 octets = ~62 KB), donc la stack par defaut 16 KB explose
+# silencieusement et bloque la session de tests des le premier appel
+# a `dag_init(&dag)`.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=81920
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=2048
+
+# --- Desactiver le task watchdog : unity_run_menu() polle stdin en boucle
+# bloquante sans yielder, ce qui declenche le WDT sur IDLE0. Sur un
+# test app, le WDT n'a pas d'utilite (pas de production runtime). ---
+# CONFIG_ESP_TASK_WDT_INIT is not set
+# CONFIG_ESP_INT_WDT is not set
+
+# --- Logs par defaut a INFO (Unity utilise printf direct, pas ESP_LOG) ---
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+
+# --- Unity : on garde l'option "menu" pour selectionner les tests
+# interactivement via la console serie au demarrage.
+# 64BIT obligatoire : plusieurs tests Mesh Pay comparent des uint64_t
+# (timestamps Lamport, currency melt, etc.). ---
+CONFIG_UNITY_ENABLE_COLOR=y
+CONFIG_UNITY_ENABLE_BACKTRACE_ON_FAIL=y
+CONFIG_UNITY_ENABLE_64BIT=y
+
+# --- Crypto Mesh Pay : Curve25519 active pour compatibilite eventuelle
+# avec d'anciennes parties du code (Monocypher est vendore par crypto) ---
+CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
+
+# --- LVGL : configs requises par le composant `ui` Mesh Pay
+# (fonts utilisees par ui_theme.c). Reprises de sdkconfig.defaults du
+# firmware principal pour que le composant ui compile dans test_app. ---
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_DRAW_BUF_STRIDE_ALIGN=1
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_LEVEL_WARN=y
+
+# --- Partitions : layout custom minimal pour test app ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"

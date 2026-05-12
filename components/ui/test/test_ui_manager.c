@@ -91,7 +91,7 @@ DEFINE_STUB_HANDLER(forward,   UI_SCREEN_FORWARD);
  * repartir d'un état propre (handlers réenregistrés, pile vide,
  * écran courant = HOME).
  */
-void setUp(void)
+__attribute__((weak)) void setUp(void)
 {
     for (int i = 0; i < UI_SCREEN_COUNT; i++) {
         s_create_count[i]  = 0;
@@ -100,7 +100,7 @@ void setUp(void)
     ui_manager_init(NULL); /* ctx NULL : les stubs ne le déréférencent pas */
 }
 
-void tearDown(void)
+__attribute__((weak)) void tearDown(void)
 {
 }
 

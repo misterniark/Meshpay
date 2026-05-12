@@ -19,12 +19,12 @@
 
 static nonce_cache_t s_cache;
 
-void setUp(void)
+__attribute__((weak)) void setUp(void)
 {
     nonce_cache_init(&s_cache);
 }
 
-void tearDown(void)
+__attribute__((weak)) void tearDown(void)
 {
     /* Rien a liberer */
 }

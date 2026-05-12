@@ -7,9 +7,27 @@
 # `transaction` reste necessaire pour le type transaction_t et les
 # helpers de (de)serialisation.
 
-idf_component_register(
-    SRCS "src/lora_sync.c"
-         "src/lora_frag.c"
-    INCLUDE_DIRS "include"
-    REQUIRES comm_protocol transaction device_hal
+set(lora_sync_srcs
+    "src/lora_sync.c"
+    "src/lora_frag.c"
 )
+
+idf_build_get_property(project_name PROJECT_NAME)
+if(project_name STREQUAL "meshpay_test_app")
+    list(APPEND lora_sync_srcs "test/test_lora_frag.c")
+    idf_component_register(
+        SRCS ${lora_sync_srcs}
+        INCLUDE_DIRS "include"
+        REQUIRES comm_protocol transaction device_hal
+        PRIV_REQUIRES unity
+        WHOLE_ARCHIVE
+    )
+    target_compile_options(${COMPONENT_LIB} PRIVATE
+        "-Wno-error=maybe-uninitialized")
+else()
+    idf_component_register(
+        SRCS ${lora_sync_srcs}
+        INCLUDE_DIRS "include"
+        REQUIRES comm_protocol transaction device_hal
+    )
+endif()

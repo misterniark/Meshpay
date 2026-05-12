@@ -390,11 +390,15 @@ TEST_CASE("dag_merge_batch_test", "[dag]")
     hash_t dummy;
     make_hash(&dummy, 0x01);
 
-    /* Créer 3 transactions */
+    /* Lot E.1bis : le helper `create_test_mint` passe `seq=0` pour
+     * toutes les TX du meme emetteur, ce qui declenche la detection
+     * de conflit nonce monotone introduite au Lot B (I3-fix). On
+     * appelle tx_create_mint directement avec des seq distincts
+     * (1, 2, 3) pour simuler un emetteur respectant son compteur. */
     transaction_t batch[3];
-    create_test_mint(&batch[0], &master, &user, 100, &dummy, 1000);
-    create_test_mint(&batch[1], &master, &user, 200, &batch[0].id, 2000);
-    create_test_mint(&batch[2], &master, &user, 300, &batch[1].id, 3000);
+    tx_create_mint(&batch[0], &master, &user.public_key, 100, 0, 1, &dummy,         1, 1000);
+    tx_create_mint(&batch[1], &master, &user.public_key, 200, 0, 2, &batch[0].id,   1, 2000);
+    tx_create_mint(&batch[2], &master, &user.public_key, 300, 0, 3, &batch[1].id,   1, 3000);
 
     /* Construire la liste des clés maîtres pour la validation */
     const public_key_t master_key_list[] = { master.public_key };

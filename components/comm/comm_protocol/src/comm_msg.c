@@ -191,6 +191,7 @@ int comm_msg_get_type(const uint8_t *buf, size_t buf_len,
         case COMM_MSG_LORA_PONG:
         case COMM_MSG_LORA_SET_ALIAS:
         case COMM_MSG_LORA_SET_BENEFICIARY:
+        case COMM_MSG_LORA_ATTESTATION: /* [Lot E.1bis] case oublie depuis l'ajout I2-fix */
             *type = (comm_msg_type_t)t;
             return 0;
         default:

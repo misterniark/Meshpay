@@ -17,7 +17,7 @@ static hal_storage_t s_storage;
 /**
  * Setup : créer un mock propre avant chaque test.
  */
-void setUp(void)
+__attribute__((weak)) void setUp(void)
 {
     hal_storage_mock_create(&s_storage);
 }
@@ -25,7 +25,7 @@ void setUp(void)
 /**
  * Teardown : rien de spécial, le mock est statique.
  */
-void tearDown(void)
+__attribute__((weak)) void tearDown(void)
 {
     /* Pas de nettoyage nécessaire */
 }

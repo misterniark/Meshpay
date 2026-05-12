@@ -14,8 +14,6 @@
 #include "comm/comm_msg.h"
 #include <string.h>
 
-void setUp(void) {}
-void tearDown(void) {}
 
 /* Helpers de remplissage de buffers avec patterns reconnaissables */
 static void fill_pubkey(public_key_t *key, uint8_t pattern)
@@ -174,6 +172,8 @@ TEST_CASE("attestation_pack_null_args", "[comm_msg]")
  */
 TEST_CASE("attestation_get_type", "[comm_msg]")
 {
+    /* Lot E.1bis : fix dans comm_msg.c (case oublie dans le switch
+     * de comm_msg_get_type). */
     uint8_t buf[1] = { COMM_MSG_LORA_ATTESTATION };
     comm_msg_type_t type;
 

@@ -8,17 +8,18 @@
 
 #include "unity.h"
 #include "comm/lora_frag.h"
+#include "comm/comm_msg.h"   /* COMM_MSG_LORA_FRAG (Lot E.1) */
 #include <string.h>
 
 /* Contexte de réassemblage partagé entre tests */
 static lora_frag_ctx_t s_ctx;
 
-void setUp(void)
+__attribute__((weak)) void setUp(void)
 {
     lora_frag_ctx_init(&s_ctx);
 }
 
-void tearDown(void)
+__attribute__((weak)) void tearDown(void)
 {
 }
 

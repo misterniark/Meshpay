@@ -16,6 +16,7 @@
 #include "currency/currency_config.h"
 #include "currency/currency_melt.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* ========================================================================= */
 /*                         Mock du temps                                      */
@@ -1254,11 +1255,15 @@ TEST_CASE("melt_fixed_epuise_solde", "[wallet][melt]")
  * 1. Un appareil reste eteint pendant 2 ans (730 jours)
  * 2. A son reveil, ticks_due ne doit pas retourner 730 mais 365
  * 3. Avec 1% BPS par jour, 365 ticks sur 10000 donne un solde tres bas
- *    mais pas forcement zero (10000 * 0.99^365 = ~25)
+ *    mais pas zero (10000 * 0.99^365 ≈ 255)
  *
  * Ce mecanisme protege contre l'effacement total du solde apres une
  * longue periode hors-ligne. Sans ce plafond, un appareil eteint
  * pendant 2 ans verrait son solde fondu presque integralement.
+ *
+ * Note Lot E.1bis : l'attente initiale `< 100` etait mathematiquement
+ * fausse (le commentaire historique disait "~25" mais 0.99^365 vaut
+ * en realite ~0.0255, soit ~255 sur 10000). Bornes ajustees a ]0, 300[.
  */
 TEST_CASE("melt_catchup_plafonne_365", "[wallet][melt]")
 {
@@ -1280,9 +1285,9 @@ TEST_CASE("melt_catchup_plafonne_365", "[wallet][melt]")
     /* Verifier que le solde n'est pas completement vide */
     uint32_t balance = 10000;
     balance = currency_melt_apply(&cfg, balance, ticks);
-    /* 10000 * 0.99^365 ≈ 25 — le solde survit grace au plafond */
+    /* 10000 * 0.99^365 ≈ 255 — le solde survit grace au plafond */
     TEST_ASSERT_TRUE(balance > 0);
-    TEST_ASSERT_TRUE(balance < 100); /* mais drastiquement reduit */
+    TEST_ASSERT_TRUE(balance < 300); /* mais drastiquement reduit (~97% fondu) */
 }
 
 /**
@@ -1512,6 +1517,12 @@ TEST_CASE("melt_next_timestamp_conserve_reste", "[wallet][melt]")
  */
 TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
 {
+    /* Lot E.1bis : refactor stack -> heap. La version d'origine plantait
+     * la session Unity en raison de 2 `dag_t` (~62 KB chacun) + 2
+     * `checkpoint_t` alloues sur la stack du test (80 KB seulement).
+     * On les passe sur le heap (psram via malloc) et on libere a la
+     * fin. Les TX et keypairs restent sur la stack (petits). */
+
     /* ---- Setup : config monnaie + keypairs ---- */
     currency_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -1525,9 +1536,18 @@ TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
     crypto_generate_keypair(&alice_kp);
     crypto_generate_keypair(&bob_kp);
 
+    /* Allocations heap : DAG et checkpoints sont trop gros pour la stack */
+    dag_t        *dag  = malloc(sizeof(dag_t));
+    dag_t        *dag2 = malloc(sizeof(dag_t));
+    checkpoint_t *chk0 = malloc(sizeof(checkpoint_t));
+    checkpoint_t *chk1 = malloc(sizeof(checkpoint_t));
+    TEST_ASSERT_NOT_NULL(dag);
+    TEST_ASSERT_NOT_NULL(dag2);
+    TEST_ASSERT_NOT_NULL(chk0);
+    TEST_ASSERT_NOT_NULL(chk1);
+
     /* ---- Jour 0 : MINT 1000 credits pour Alice ---- */
-    dag_t dag;
-    dag_init(&dag);
+    dag_init(dag);
 
     hash_t genesis_h;
     make_hash(&genesis_h, 0xAA);
@@ -1544,16 +1564,15 @@ TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
     mint_tx.status = TX_STATUS_CONFIRMED;
     memcpy(&mint_tx.parents[0], &genesis_h, sizeof(hash_t));
     mint_tx.parent_count = 1;
-    dag_insert(&dag, &mint_tx);
+    dag_insert(dag, &mint_tx);
 
     /* Creer un checkpoint initial (avant fonte) */
-    checkpoint_t chk0;
-    esp_err_t err = checkpoint_create(&dag, NULL, NULL, &chk0);
+    esp_err_t err = checkpoint_create(dag, NULL, NULL, chk0);
     TEST_ASSERT_EQUAL(ESP_OK, err);
 
     /* Verifier : Alice a 1000 credits */
     uint32_t alice_bal;
-    err = checkpoint_get_balance(&chk0, &alice_kp.public_key, &alice_bal);
+    err = checkpoint_get_balance(chk0, &alice_kp.public_key, &alice_bal);
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_EQUAL(1000, alice_bal);
 
@@ -1566,15 +1585,15 @@ TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
 
     /*
      * Appliquer la fonte au checkpoint (comme main.c le fait).
-     * Alice : 1000 * 0.99^3 = 970 (1000→990→980→970)
+     * Alice : 1000 * 0.99^3 = 970 (1000->990->980->970)
      */
-    for (uint32_t i = 0; i < chk0.account_count; i++) {
-        chk0.accounts[i].balance = currency_melt_apply(
-            &cfg, chk0.accounts[i].balance, ticks);
+    for (uint32_t i = 0; i < chk0->account_count; i++) {
+        chk0->accounts[i].balance = currency_melt_apply(
+            &cfg, chk0->accounts[i].balance, ticks);
     }
-    chk0.last_melt_timestamp = currency_melt_next_timestamp(&cfg, t0, ticks, t3);
+    chk0->last_melt_timestamp = currency_melt_next_timestamp(&cfg, t0, ticks, t3);
 
-    err = checkpoint_get_balance(&chk0, &alice_kp.public_key, &alice_bal);
+    err = checkpoint_get_balance(chk0, &alice_kp.public_key, &alice_bal);
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_EQUAL(970, alice_bal);
 
@@ -1591,23 +1610,18 @@ TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
     transfer_tx.status = TX_STATUS_CONFIRMED;
     memcpy(&transfer_tx.parents[0], &mint_tx.id, sizeof(hash_t));
     transfer_tx.parent_count = 1;
-    dag_insert(&dag, &transfer_tx);
+    dag_insert(dag, &transfer_tx);
 
     /*
      * Nouveau checkpoint incremental apres le transfert.
      * Le checkpoint base a les soldes fondus (Alice=970).
-     * Le DAG contient le MINT (+1000 Alice) et le TRANSFER (-210 Alice, +200 Bob).
-     *
-     * Attention : checkpoint_create recalcule depuis le DAG complet +
-     * la base. Donc pour isoler le transfert, on efface le dag et on
-     * ne met que le transfert, avec la base = chk0 (qui a deja le MINT fondu).
+     * On utilise un second DAG isole ne contenant que le transfert
+     * pour que checkpoint_create n'applique pas deux fois le MINT.
      */
-    dag_t dag2;
-    dag_init(&dag2);
-    dag_insert(&dag2, &transfer_tx);
+    dag_init(dag2);
+    dag_insert(dag2, &transfer_tx);
 
-    checkpoint_t chk1;
-    err = checkpoint_create(&dag2, &chk0, NULL, &chk1);
+    err = checkpoint_create(dag2, chk0, NULL, chk1);
     TEST_ASSERT_EQUAL(ESP_OK, err);
 
     /*
@@ -1616,39 +1630,39 @@ TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
      * Bob   : 0 (base) + 200 (recu) = 200
      * Fee de 10 brule (disparait de la masse monetaire)
      */
-    err = checkpoint_get_balance(&chk1, &alice_kp.public_key, &alice_bal);
+    err = checkpoint_get_balance(chk1, &alice_kp.public_key, &alice_bal);
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_EQUAL(760, alice_bal);
 
     uint32_t bob_bal;
-    err = checkpoint_get_balance(&chk1, &bob_kp.public_key, &bob_bal);
+    err = checkpoint_get_balance(chk1, &bob_kp.public_key, &bob_bal);
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_EQUAL(200, bob_bal);
 
     /* ---- Jour 5 : 2 ticks de fonte supplementaires ---- */
     uint64_t t5 = t3 + (2ULL * 86400 * 1000);
-    chk1.last_melt_timestamp = chk0.last_melt_timestamp; /* main.c le copie */
+    chk1->last_melt_timestamp = chk0->last_melt_timestamp; /* main.c le copie */
 
-    ticks = currency_melt_ticks_due(&cfg, chk1.last_melt_timestamp, t5);
+    ticks = currency_melt_ticks_due(&cfg, chk1->last_melt_timestamp, t5);
     TEST_ASSERT_EQUAL(2, ticks);
 
-    for (uint32_t i = 0; i < chk1.account_count; i++) {
-        chk1.accounts[i].balance = currency_melt_apply(
-            &cfg, chk1.accounts[i].balance, ticks);
+    for (uint32_t i = 0; i < chk1->account_count; i++) {
+        chk1->accounts[i].balance = currency_melt_apply(
+            &cfg, chk1->accounts[i].balance, ticks);
     }
-    chk1.last_melt_timestamp = currency_melt_next_timestamp(
-        &cfg, chk1.last_melt_timestamp, ticks, t5);
+    chk1->last_melt_timestamp = currency_melt_next_timestamp(
+        &cfg, chk1->last_melt_timestamp, ticks, t5);
 
     /*
      * Apres 2 ticks supplementaires (1% par jour) :
-     * Alice : 760 * 0.99^2 = 760 → 752 → 744
-     * Bob   : 200 * 0.99^2 = 200 → 198 → 196
+     * Alice : 760 * 0.99^2 = 760 -> 752 -> 744
+     * Bob   : 200 * 0.99^2 = 200 -> 198 -> 196
      */
-    err = checkpoint_get_balance(&chk1, &alice_kp.public_key, &alice_bal);
+    err = checkpoint_get_balance(chk1, &alice_kp.public_key, &alice_bal);
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_EQUAL(744, alice_bal);
 
-    err = checkpoint_get_balance(&chk1, &bob_kp.public_key, &bob_bal);
+    err = checkpoint_get_balance(chk1, &bob_kp.public_key, &bob_bal);
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_EQUAL(196, bob_bal);
 
@@ -1658,10 +1672,13 @@ TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
      * Jour 3 apres fonte : 970 (Alice)
      * Jour 3 apres transfert : 760 (Alice) + 200 (Bob) = 960 (-10 fee)
      * Jour 5 apres fonte : 744 + 196 = 940
-     *
-     * On verifie que le total est bien inferieur au MINT initial.
      */
     uint32_t masse_totale = alice_bal + bob_bal;
     TEST_ASSERT_TRUE(masse_totale < 1000);
     TEST_ASSERT_EQUAL(940, masse_totale);
+
+    free(dag);
+    free(dag2);
+    free(chk0);
+    free(chk1);
 }
