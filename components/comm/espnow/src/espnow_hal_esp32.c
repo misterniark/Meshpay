@@ -20,6 +20,24 @@
 
 static const char *TAG = "espnow_hal_esp32";
 
+/*
+ * Canal Wi-Fi commun a tous les devices Mesh Pay.
+ *
+ * ESP-NOW exige que l'emetteur et le recepteur soient sur le meme
+ * canal Wi-Fi pour communiquer. En mode STA non-connecte, le canal
+ * courant n'est pas garanti d'etre identique entre deux devices
+ * (il depend du country code et de l'historique de la radio). Sans
+ * fixer un canal explicite, deux Mesh Pay peuvent etre sur des canaux
+ * differents et ne jamais se voir.
+ *
+ * On force le canal 1 (autorise dans toutes les regions, FR/EU/US/...)
+ * apres esp_wifi_start() et on configure ce meme canal sur chaque peer
+ * ajoute via esp_now_add_peer(). Si un jour la coexistence avec un AP
+ * local devient necessaire, ce canal devra etre rendu configurable via
+ * Kconfig.
+ */
+#define ESPNOW_WIFI_CHANNEL 1
+
 /* ================================================================
  * Contexte interne
  * ================================================================ */
@@ -78,6 +96,21 @@ static hal_err_t esp32_init(void *ctx)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    /*
+     * Fixer explicitement le canal Wi-Fi apres esp_wifi_start().
+     * Sans cet appel, le canal courant en mode STA non-connecte
+     * peut diverger entre deux devices et ESP-NOW echoue
+     * silencieusement (paquets emis mais jamais recus).
+     * WIFI_SECOND_CHAN_NONE = pas de canal secondaire HT40.
+     */
+    err = esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_channel(%d) echoue : 0x%x",
+                 ESPNOW_WIFI_CHANNEL, err);
+        return HAL_FAIL;
+    }
+    ESP_LOGI(TAG, "Canal Wi-Fi force a %d pour ESP-NOW", ESPNOW_WIFI_CHANNEL);
+
     /* Initialiser ESP-NOW */
     err = esp_now_init();
     if (err != ESP_OK) {
@@ -91,10 +124,15 @@ static hal_err_t esp32_init(void *ctx)
     /*
      * Ajouter le peer broadcast pour pouvoir envoyer en broadcast.
      * ESP-NOW exige que le peer soit enregistré avant l'envoi.
+     *
+     * channel = ESPNOW_WIFI_CHANNEL : on enregistre le peer sur le
+     * canal commun. La valeur 0 ("canal courant") fonctionne tant
+     * que le canal courant ne change pas, mais reste fragile si une
+     * routine future modifie le canal (scan Wi-Fi, AP soft-AP...).
      */
     esp_now_peer_info_t broadcast_peer = {0};
     memset(broadcast_peer.peer_addr, 0xFF, 6);
-    broadcast_peer.channel = 0;
+    broadcast_peer.channel = ESPNOW_WIFI_CHANNEL;
     broadcast_peer.encrypt = false;
 
     err = esp_now_add_peer(&broadcast_peer);
@@ -129,7 +167,7 @@ static hal_err_t esp32_send(const uint8_t *dest_mac, const uint8_t *data,
      */
     esp_now_peer_info_t peer = {0};
     memcpy(peer.peer_addr, dest_mac, 6);
-    peer.channel = 0;
+    peer.channel = ESPNOW_WIFI_CHANNEL;
     peer.encrypt = false;
 
     esp_err_t err = esp_now_add_peer(&peer);

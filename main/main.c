@@ -36,6 +36,30 @@
 #include "esp_partition.h"
 #endif
 
+/*
+ * Capabilites compilees selon la cible materielle.
+ *
+ * Defini ici (avant les includes specifiques au projet) pour pouvoir
+ * gater les includes eux-memes (comm/espnow.h, hal/hal_lora.h, ...).
+ *
+ * MP_HAS_ESPNOW : ESP-NOW est la base de communication courte portee
+ *   de Mesh Pay (decouverte de peers, paiement). Tout device qui
+ *   embarque une radio Wi-Fi le supporte — donc ESP32 (CYD) ET
+ *   ESP32-S3 (Waveshare). Ne JAMAIS exclure un device d'ESP-NOW :
+ *   sinon les deux Mesh Pay ne se voient pas pendant un paiement.
+ *
+ * MP_HAS_LORA : LoRa via Wio-E5 UART necessite des broches GPIO et
+ *   un module radio specifique. Aujourd'hui present uniquement sur
+ *   la carte CYD (ESP32). La Waveshare ESP32-S3-Touch-LCD-1.47 n'a
+ *   pas de Wio-E5 onboard, donc pas de LoRa pour l'instant.
+ */
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
+#define MP_HAS_ESPNOW 1
+#endif
+#if CONFIG_IDF_TARGET_ESP32
+#define MP_HAS_LORA 1
+#endif
+
 /* Core */
 #include "crypto/crypto_types.h"
 #include "crypto/crypto_init.h"
@@ -54,8 +78,10 @@
 
 /* Comm */
 #include "comm/comm_event.h"
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_ESPNOW
 #include "comm/espnow.h"
+#endif
+#ifdef MP_HAS_LORA
 #include "comm/lora_sync.h"
 #endif
 
@@ -70,7 +96,7 @@
 /* HAL */
 #include "hal/hal_storage.h"
 #include "hal/hal_display.h"
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
 #include "hal/hal_lora.h"
 #endif
 
@@ -149,7 +175,7 @@ static const char *TAG = "main";
 /** Nombre maximum de peers connus */
 #define MAX_PEERS  10
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
 /** Pins LoRa Wio-E5 (UART2) — ESP32 CYD uniquement */
 #define LORA_UART_NUM    2
 #define LORA_TX_PIN     17
@@ -157,7 +183,7 @@ static const char *TAG = "main";
 
 /** Intervalle de sync LoRa (ms) */
 #define LORA_SYNC_INTERVAL_MS  120000
-#endif /* CONFIG_IDF_TARGET_ESP32 */
+#endif /* MP_HAS_LORA */
 
 /* ================================================================
  * Declarations des factories HAL (pas de header public)
@@ -165,10 +191,14 @@ static const char *TAG = "main";
 
 extern hal_err_t hal_storage_esp32_create(hal_storage_t *storage);
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_ESPNOW
 extern hal_err_t espnow_hal_esp32_create(espnow_hal_t *hal);
+#endif
+#ifdef MP_HAS_LORA
 extern hal_err_t hal_lora_wio_e5_create(hal_lora_t *lora,
                                         int uart_num, int tx_pin, int rx_pin);
+#endif
+#if CONFIG_IDF_TARGET_ESP32
 extern hal_err_t hal_display_ili9341_create(hal_display_t *display);
 #elif CONFIG_IDF_TARGET_ESP32S3
 extern hal_err_t hal_display_jd9853_create(hal_display_t *display);
@@ -190,14 +220,16 @@ static keypair_t          s_keypair;
 static checkpoint_t       s_checkpoint;
 static hal_storage_t      s_storage;
 static hal_display_t      s_display;
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_ESPNOW
 static espnow_hal_t       s_espnow_hal;
+#endif
+#ifdef MP_HAS_LORA
 static hal_lora_t         s_lora_hal;
 #endif
 
 /** Queues et mutex inter-taches */
 static QueueHandle_t      s_evt_queue;
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_ESPNOW
 static QueueHandle_t      s_cmd_queue;
 #endif
 static SemaphoreHandle_t  s_state_mutex;
@@ -244,7 +276,7 @@ static uint32_t    s_seen_bcast_count = 0;
  * Buffer de relay : contient le message packe a retransmettre via LoRa.
  * Rempli par handle_broadcast_received(), consomme apres release du mutex.
  */
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
 static uint8_t  s_relay_bcast_buf[COMM_MSG_LORA_MAX];
 static size_t   s_relay_bcast_len = 0;
 static bool     s_relay_bcast_pending = false;
@@ -291,7 +323,7 @@ static uint32_t          s_seen_ping_count = 0;
  * Buffer de relay PING (meme principe que le relay broadcast).
  * Rempli par handle_ping_received(), consomme apres release du mutex.
  */
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
 static uint8_t  s_relay_ping_buf[COMM_MSG_PING_SIZE];
 static size_t   s_relay_ping_len = 0;
 static bool     s_relay_ping_pending = false;
@@ -429,7 +461,7 @@ static uint32_t compute_melted_balance(uint32_t balance)
     return currency_melt_apply(&s_currency, balance, ticks);
 }
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
 /**
  * @brief Wrapper pour obtenir le compteur Lamport courant.
  *
@@ -1479,7 +1511,7 @@ static void handle_tx_received(const comm_event_t *evt)
         /* Confirmer la TX dans le DAG */
         dag_set_status(&s_dag, &rx_tx->id, TX_STATUS_CONFIRMED);
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_ESPNOW
         /* Envoyer ACK via ESP-NOW (courte portée, direct à l'émetteur) */
         const uint8_t *dest_mac = find_peer_mac(&rx_tx->from);
         if (dest_mac != NULL) {
@@ -1492,7 +1524,7 @@ static void handle_tx_received(const comm_event_t *evt)
         }
 #endif
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
         /*
          * [I2-fix] Diffuser aussi une ATTESTATION signée en LoRa.
          *
@@ -1781,7 +1813,7 @@ static void handle_broadcast_received(const comm_event_t *evt)
     ESP_LOGI(TAG, "Broadcast maitre accepte (%u chars): \"%.*s\"",
              bcast->text_len, bcast->text_len, bcast->text);
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
     /*
      * 5. Preparer le relay LoRa.
      * On re-packe le message original (meme pubkey + sig du maitre)
@@ -1874,7 +1906,7 @@ static void handle_ping_received(const comm_event_t *evt)
 
     ESP_LOGI(TAG, "Ping maitre recu (id=%u), envoi PONG", ping->ping_id);
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
     /*
      * 3. Preparer le PONG avec notre identite (envoi differe).
      *
@@ -2359,7 +2391,7 @@ static esp_err_t initiate_payment(const public_key_t *to, uint32_t amount)
         goto done;
     }
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_ESPNOW
     /* 6. Envoyer via ESP-NOW */
     const uint8_t *dest_mac = find_peer_mac(to);
     if (dest_mac != NULL) {
@@ -2371,11 +2403,10 @@ static esp_err_t initiate_payment(const public_key_t *to, uint32_t amount)
         xQueueSend(s_cmd_queue, &cmd, 0);
     } else {
         ESP_LOGW(TAG, "Destinataire non trouve dans la table des peers");
-        /* La TX est quand meme dans le DAG + lockee, elle sera sync via LoRa */
+        /* La TX est quand meme dans le DAG + lockee, elle sera sync via LoRa
+         * sur les cartes equipees de LoRa. Sur les autres (Waveshare S3),
+         * elle restera dans le DAG local jusqu'a une future decouverte. */
     }
-#else
-    /* ESP32-S3 : client-only, pas d'envoi ESP-NOW pour l'instant */
-    ESP_LOGI(TAG, "TX locale (pas d'envoi ESP-NOW sur ce device)");
 #endif
 
     ESP_LOGI(TAG, "Paiement initie: amount=%"PRIu32, amount);
@@ -2820,7 +2851,7 @@ static void handle_ui_command(const ui_cmd_t *cmd)
 
         case UI_CMD_DISCOVER_PEERS:
             ESP_LOGI(TAG, "UI CMD: Discover peers");
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_ESPNOW
             {
                 comm_cmd_t disc_cmd;
                 memset(&disc_cmd, 0, sizeof(disc_cmd));
@@ -2828,7 +2859,7 @@ static void handle_ui_command(const ui_cmd_t *cmd)
                 xQueueSend(s_cmd_queue, &disc_cmd, pdMS_TO_TICKS(100));
             }
 #else
-            ESP_LOGW(TAG, "DISCOVER non disponible sur ce device");
+            ESP_LOGW(TAG, "DISCOVER non disponible sur ce device (pas d'ESP-NOW)");
 #endif
             break;
 
@@ -2979,7 +3010,7 @@ static void core_task(void *param)
 
         xSemaphoreGive(s_state_mutex);
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_LORA
         /*
          * Relay broadcast LoRa (hors mutex).
          *
@@ -3316,36 +3347,58 @@ void app_main(void)
     }
 
     /* ---- 11. HAL display + comm ---- */
+    /*
+     * Display : un par cible (ILI9341 sur CYD, JD9853 sur Waveshare).
+     * ESP-NOW : sur les deux cibles (toute radio Wi-Fi le supporte).
+     * LoRa : uniquement sur les cartes qui embarquent un Wio-E5.
+     */
 #if CONFIG_IDF_TARGET_ESP32
     hal_display_ili9341_create(&s_display);
+#elif CONFIG_IDF_TARGET_ESP32S3
+    hal_display_jd9853_create(&s_display);
+#endif
 
+#ifdef MP_HAS_ESPNOW
     if (espnow_hal_esp32_create(&s_espnow_hal) != HAL_OK) {
         ESP_LOGE(TAG, "ESP-NOW HAL init echoue");
         return;
     }
+#endif
 
+#ifdef MP_HAS_LORA
     if (hal_lora_wio_e5_create(&s_lora_hal, LORA_UART_NUM,
                                 LORA_TX_PIN, LORA_RX_PIN) != HAL_OK) {
         ESP_LOGW(TAG, "LoRa HAL init echoue (fonctionnement sans LoRa)");
     }
-    ESP_LOGI(TAG, "[11/12] HAL initialises (CYD: ILI9341 + ESP-NOW + LoRa)");
-#elif CONFIG_IDF_TARGET_ESP32S3
-    hal_display_jd9853_create(&s_display);
-    ESP_LOGI(TAG, "[11/12] HAL initialises (Waveshare: JD9853, client-only)");
 #endif
+
+    ESP_LOGI(TAG, "[11/12] HAL initialises"
+#ifdef MP_HAS_ESPNOW
+             " + ESP-NOW"
+#endif
+#ifdef MP_HAS_LORA
+             " + LoRa"
+#endif
+            );
 
     /* ---- 12. Queues, mutex et taches ---- */
     s_evt_queue = xQueueCreate(EVT_QUEUE_DEPTH, sizeof(comm_event_t));
     s_state_mutex = xSemaphoreCreateMutex();
 
-#if CONFIG_IDF_TARGET_ESP32
+#ifdef MP_HAS_ESPNOW
     s_cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(comm_cmd_t));
+    if (!s_cmd_queue) {
+        ESP_LOGE(TAG, "Erreur creation s_cmd_queue");
+        return;
+    }
+#endif
 
-    if (!s_evt_queue || !s_cmd_queue || !s_state_mutex) {
+    if (!s_evt_queue || !s_state_mutex) {
         ESP_LOGE(TAG, "Erreur creation queues/mutex");
         return;
     }
 
+#ifdef MP_HAS_ESPNOW
     /* Configuration ESP-NOW task */
     static espnow_config_t espnow_cfg;
     memset(&espnow_cfg, 0, sizeof(espnow_cfg));
@@ -3356,6 +3409,11 @@ void app_main(void)
     espnow_cfg.keypair = &s_keypair;
     strncpy(espnow_cfg.own_alias, s_device_alias, sizeof(espnow_cfg.own_alias) - 1);
 
+    xTaskCreate(espnow_task, "espnow", ESPNOW_TASK_STACK, &espnow_cfg,
+                ESPNOW_TASK_PRIO, NULL);
+#endif
+
+#ifdef MP_HAS_LORA
     /* Configuration LoRa sync task.
      *
      * [Lot C item 7] Le DAG et le mutex applicatif ne sont plus passes
@@ -3375,16 +3433,8 @@ void app_main(void)
     lora_cfg.own_keypair = &s_keypair;
     lora_cfg.get_lamport = get_lamport_wrapper;
 
-    /* Lancer les taches comm (ESP32 uniquement) */
-    xTaskCreate(espnow_task, "espnow", ESPNOW_TASK_STACK, &espnow_cfg,
-                ESPNOW_TASK_PRIO, NULL);
     xTaskCreate(lora_sync_task, "lora", LORA_TASK_STACK, &lora_cfg,
                 LORA_TASK_PRIO, NULL);
-#else
-    if (!s_evt_queue || !s_state_mutex) {
-        ESP_LOGE(TAG, "Erreur creation queues/mutex");
-        return;
-    }
 #endif
 
     /* Tache core — commune aux deux targets */
