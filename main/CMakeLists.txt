@@ -40,6 +40,14 @@ set(meshpay_main_srcs
     "ui_dispatch.c"
 )
 
+# Lot D.7 : debug console. Reel si CONFIG_MESHPAY_DEBUG_CONSOLE=y, sinon stub.
+# Le code applicatif appelle `debug_console_register_dumps()` sans `#if`.
+if(CONFIG_MESHPAY_DEBUG_CONSOLE)
+    list(APPEND meshpay_main_srcs "debug_console_dumps.c")
+else()
+    list(APPEND meshpay_main_srcs "debug_console_dumps_stub.c")
+endif()
+
 # Lot D.3 : facade LoRa. Sur ESP32 (CYD) : impl reelle. Sur autres
 # cibles (ESP32-S3, etc.) : stub no-op. Le code applicatif n'a plus
 # aucun `#ifdef MP_HAS_LORA` autour des appels.
