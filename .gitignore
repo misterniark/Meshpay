@@ -21,6 +21,8 @@ flash_encryption_key*
 
 # --- Build ESP-IDF -------------------------------------------------------
 build/
+build-s3/
+build-esp32/
 sdkconfig
 sdkconfig.old
 sdkconfig.*.bak

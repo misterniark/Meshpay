@@ -9,7 +9,14 @@
 # Ces composants sont compilés mais non utilisés sur ESP32-S3.
 
 idf_component_register(
-    SRCS "main.c"
+    SRCS
+        "main.c"
+        # Modules extraits au Lot D du refactoring (2026-05-13)
+        "app_state.c"
+        "time_glue.c"
+        "stack_monitor.c"
+        "peers.c"
+        "currency_config_init.c"
     INCLUDE_DIRS "."
     REQUIRES wallet dag transaction crypto
              comm_protocol espnow lora_sync

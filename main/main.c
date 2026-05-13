@@ -37,71 +37,35 @@
 #endif
 
 /*
- * Capabilites compilees selon la cible materielle.
+ * Etat global et capabilites (MP_HAS_ESPNOW / MP_HAS_LORA) :
+ * voir app_state.h.
  *
- * Defini ici (avant les includes specifiques au projet) pour pouvoir
- * gater les includes eux-memes (comm/espnow.h, hal/hal_lora.h, ...).
- *
- * MP_HAS_ESPNOW : ESP-NOW est la base de communication courte portee
- *   de Mesh Pay (decouverte de peers, paiement). Tout device qui
- *   embarque une radio Wi-Fi le supporte — donc ESP32 (CYD) ET
- *   ESP32-S3 (Waveshare). Ne JAMAIS exclure un device d'ESP-NOW :
- *   sinon les deux Mesh Pay ne se voient pas pendant un paiement.
- *
- * MP_HAS_LORA : LoRa via Wio-E5 UART necessite des broches GPIO et
- *   un module radio specifique. Aujourd'hui present uniquement sur
- *   la carte CYD (ESP32). La Waveshare ESP32-S3-Touch-LCD-1.47 n'a
- *   pas de Wio-E5 onboard, donc pas de LoRa pour l'instant.
+ * Modules extraits au Lot D :
+ *   - app_state            : storage des variables d'etat
+ *   - time_glue            : wrappers temps + collect TX confirmees
+ *   - stack_monitor        : tache de log des HWM
+ *   - peers                : add_peer / find_peer_mac
+ *   - currency_config_init : init de s_currency
  */
-#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
-#define MP_HAS_ESPNOW 1
-#endif
-#if CONFIG_IDF_TARGET_ESP32
-#define MP_HAS_LORA 1
-#endif
+#include "app_state.h"
+#include "time_glue.h"
+#include "stack_monitor.h"
+#include "peers.h"
+#include "currency_config_init.h"
 
 /* Core */
-#include "crypto/crypto_types.h"
 #include "crypto/crypto_init.h"
 #include "crypto/crypto_keys.h"
 #include "crypto/crypto_sign.h"
-#include "transaction/tx_types.h"
 #include "transaction/tx_create.h"
 #include "transaction/tx_validate.h"
 #include "transaction/tx_serialize.h"
-#include "dag/dag.h"
 #include "dag/dag_merge.h"
 #include "dag/dag_prune.h"
-#include "wallet/wallet.h"
-#include "wallet/wallet_lock.h"
-#include "wallet/wallet_checkpoint.h"
-
-/* Comm */
-#include "comm/comm_event.h"
-#ifdef MP_HAS_ESPNOW
-#include "comm/espnow.h"
-#endif
-#ifdef MP_HAS_LORA
-#include "comm/lora_sync.h"
-#endif
 
 /* Currency */
-#include "currency/currency_config.h"
 #include "currency/currency_rules.h"
 #include "currency/currency_melt.h"
-
-/* Time manager */
-#include "time_manager/time_manager.h"
-
-/* HAL */
-#include "hal/hal_storage.h"
-#include "hal/hal_display.h"
-#ifdef MP_HAS_LORA
-#include "hal/hal_lora.h"
-#endif
-
-/* UI */
-#include "ui/ui_state.h"
 
 /* Debug console (stub si CONFIG_MESHPAY_DEBUG_CONSOLE=n — voir le
  * header pour la strategie de gating). */
@@ -109,81 +73,8 @@
 
 static const char *TAG = "main";
 
-/* ================================================================
- * Constantes
- * ================================================================ */
-
-/** Profondeur des queues inter-taches */
-#define EVT_QUEUE_DEPTH      16
-#define CMD_QUEUE_DEPTH       8
-
-/** Tailles de stack des taches (en mots de 4 octets).
- *
- * [Lot C item 8] Tailles augmentees suite a l'audit : espnow et lora
- * font de la crypto (Ed25519, SHA-256) et serialisent du CBOR sur des
- * buffers de plusieurs centaines d'octets — 4096 mots etait dangereux
- * (overflow silencieux corrompt le heap). core_task agrege tout le
- * traitement metier + DAG, le porter a 10240 donne une marge plus saine
- * avant l'extraction prevue dans le refactor du Lot D.
- *
- * Une instrumentation periodique (uxTaskGetHighWaterMark) loggue la
- * marge restante toutes les 30 s en build debug — voir la tache
- * stack_monitor_task plus bas. */
-#define ESPNOW_TASK_STACK  6144
-#define CORE_TASK_STACK   10240
-#define LORA_TASK_STACK    6144
-#define UI_TASK_STACK      8192
-#define UI_CMD_QUEUE_DEPTH    8
-
-/** Periode de log des high-water-marks de stack (ms). */
-#define STACK_MONITOR_PERIOD_MS  30000
-/** Stack de la tache de monitoring.
- *
- * Augmentee de 2048 a 4096 mots au Lot E.6 (2026-05-12) suite a un stack
- * overflow detecte sur Waveshare ESP32-S3 toutes les 30 s :
- *
- *   ***ERROR*** A stack overflow in task stkmon has been detected.
- *
- * Cause : ESP_LOGI est gourmand en stack (formatage printf, %s, mutex
- * console). Avec 2048 mots (=8 KB), apres 2 ESP_LOGI consecutifs et un
- * xTaskGetHandle/uxTaskGetStackHighWaterMark sur elle-meme, la stack
- * etait corrompue → reboot toutes les 30 s. 4096 mots (=16 KB) donne
- * une marge confortable. */
-#define STACK_MONITOR_TASK_STACK 4096
-
-/** Priorites des taches */
-#define ESPNOW_TASK_PRIO      7
-#define CORE_TASK_PRIO        6
-#define LORA_TASK_PRIO        5
-#define UI_TASK_PRIO          4
-
-/** Cles NVS pour la persistance */
-#define NVS_NAMESPACE         "payment"
-#define NVS_KEY_PRIVKEY       "privkey"
-#define NVS_KEY_PUBKEY        "pubkey"
-#define NVS_KEY_CHECKPOINT    "checkpoint"
-#define NVS_KEY_FIRST_BOOT    "first_boot"
-#define NVS_KEY_ALIAS         "alias"
-#define NVS_KEY_BENEFICIARY   "beneficiary"
-#define NVS_KEY_FWD_INTERVAL  "fwd_intv"
-/* [I3-fix] Nonce monotone de ce device (incremente a chaque TX emise). */
-#define NVS_KEY_NEXT_SEQ      "next_seq"
-
-/** Intervalle de verification des expirations (ms) */
-#define LOCK_EXPIRE_INTERVAL_MS   5000
-
-/** Nombre maximum de peers connus */
-#define MAX_PEERS  10
-
-#ifdef MP_HAS_LORA
-/** Pins LoRa Wio-E5 (UART2) — ESP32 CYD uniquement */
-#define LORA_UART_NUM    2
-#define LORA_TX_PIN     17
-#define LORA_RX_PIN     16
-
-/** Intervalle de sync LoRa (ms) */
-#define LORA_SYNC_INTERVAL_MS  120000
-#endif /* MP_HAS_LORA */
+/* Constantes (queues, stacks, priorites, cles NVS, MAX_PEERS, etc.)
+ * deplacees dans app_state.h (Lot D 2026-05-13). */
 
 /* ================================================================
  * Declarations des factories HAL (pas de header public)
@@ -207,330 +98,8 @@ extern hal_err_t hal_display_jd9853_create(hal_display_t *display);
 /** Tache UI (definie dans ui_task.c) */
 extern void ui_task(void *pvParam);
 
-/* ================================================================
- * Etat global statique (~120 KB)
- * ================================================================ */
-
-static dag_t              s_dag;             /* ~116 KB (500 TX x 232 octets) */
-static wallet_t           s_wallet;
-static lock_table_t       s_lock_table;
-static time_manager_t     s_time_manager;
-static currency_config_t  s_currency;
-static keypair_t          s_keypair;
-static checkpoint_t       s_checkpoint;
-static hal_storage_t      s_storage;
-static hal_display_t      s_display;
-#ifdef MP_HAS_ESPNOW
-static espnow_hal_t       s_espnow_hal;
-#endif
-#ifdef MP_HAS_LORA
-static hal_lora_t         s_lora_hal;
-#endif
-
-/** Queues et mutex inter-taches */
-static QueueHandle_t      s_evt_queue;
-#ifdef MP_HAS_ESPNOW
-static QueueHandle_t      s_cmd_queue;
-#endif
-static SemaphoreHandle_t  s_state_mutex;
-
-/** Contexte et queue de commandes de l'UI */
-static ui_ctx_t           s_ui_ctx;
-static QueueHandle_t      s_ui_cmd_queue;
-
-/** Feedback paiement core → UI (ecrit par core, lu/reset par UI) */
-static volatile ui_pay_feedback_t s_pay_feedback = UI_PAY_FEEDBACK_NONE;
-
-/** Table des peers decouverts */
-static comm_peer_info_t   s_peers[MAX_PEERS];
-static uint32_t           s_peer_count = 0;
-
-/** Timestamp de la derniere verification d'expiration */
-static uint64_t           s_last_expire_check = 0;
-
-/**
- * [I3-fix] Nonce monotone de ce device : valeur du prochain seq a
- * attribuer a une TX qu'on va emettre. Incremente a chaque appel a
- * next_seq(). Persiste en NVS pour survivre aux reboots — sinon deux
- * TX emises successivement encadrant un reboot auraient le meme seq
- * et provoqueraient un (faux) conflit vu du reseau.
- */
-static uint32_t           s_next_seq = 0;
-
-/** Dernier broadcast maitre recu (contenu + flag pour l'UI) */
-static comm_msg_broadcast_t s_pending_broadcast;
-static bool                 s_broadcast_pending = false;
-
-/**
- * Cache des broadcasts deja vus (anti-boucle relay).
- *
- * On stocke la signature de chaque broadcast traite. Comme la signature
- * est unique par contenu+emetteur, elle sert d'identifiant de message.
- * Buffer circulaire de MAX_SEEN_BROADCASTS entrees.
- */
-#define MAX_SEEN_BROADCASTS 16
-static signature_t s_seen_bcast[MAX_SEEN_BROADCASTS];
-static uint32_t    s_seen_bcast_count = 0;
-
-/**
- * Buffer de relay : contient le message packe a retransmettre via LoRa.
- * Rempli par handle_broadcast_received(), consomme apres release du mutex.
- */
-#ifdef MP_HAS_LORA
-static uint8_t  s_relay_bcast_buf[COMM_MSG_LORA_MAX];
-static size_t   s_relay_bcast_len = 0;
-static bool     s_relay_bcast_pending = false;
-#endif
-
-/** Alias du device (charge depuis NVS ou genere au premier boot) */
-static char    s_device_alias[COMM_MSG_ALIAS_MAX + 1] = "Device";
-static uint8_t s_device_alias_len = 6;
-
-/**
- * Etat du ping/pong LoRa.
- *
- * Le maitre envoie un PING et collecte les PONGs pendant quelques secondes.
- * Les resultats sont stockes dans s_ping_results[].
- */
-#define MAX_PING_RESULTS 32
-typedef struct {
-    public_key_t key;
-    char         alias[COMM_MSG_ALIAS_MAX + 1];
-    uint8_t      alias_len;
-} ping_result_t;
-
-static ping_result_t s_ping_results[MAX_PING_RESULTS];
-static uint32_t      s_ping_result_count = 0;
-static uint16_t      s_current_ping_id   = 0;
-static bool          s_ping_active       = false;
-
-/**
- * Cache anti-boucle pour le relay de PING.
- *
- * On stocke les derniers ping_id vus. Comme les ping_id sont incrementaux
- * et les pings sont rares, un petit cache circulaire suffit.
- */
-#define MAX_SEEN_PINGS 4
-typedef struct {
-    public_key_t master_key;
-    uint16_t     ping_id;
-} seen_ping_entry_t;
-
-static seen_ping_entry_t s_seen_pings[MAX_SEEN_PINGS];
-static uint32_t          s_seen_ping_count = 0;
-
-/**
- * Buffer de relay PING (meme principe que le relay broadcast).
- * Rempli par handle_ping_received(), consomme apres release du mutex.
- */
-#ifdef MP_HAS_LORA
-static uint8_t  s_relay_ping_buf[COMM_MSG_PING_SIZE];
-static size_t   s_relay_ping_len = 0;
-static bool     s_relay_ping_pending = false;
-
-/**
- * Buffer PONG differe : au lieu de bloquer core_task avec vTaskDelay
- * sous le mutex, on stocke le PONG a envoyer et le delai voulu.
- * L'envoi effectif se fait hors mutex dans la boucle core_task,
- * une fois le delai ecoule.
- */
-static uint8_t    s_pong_buf[COMM_MSG_LORA_MAX];
-static size_t     s_pong_len = 0;
-static bool       s_pong_pending = false;
-static uint32_t   s_pong_delay_ms = 0;
-static TickType_t s_pong_start_tick = 0;
-#endif
-
-/**
- * Etat auto-forward beneficiaire.
- *
- * Quand s_forward_interval_min > 0, le device transfere periodiquement
- * la totalite de son solde vers s_beneficiary_key. Configure par le
- * maitre via LORA_SET_BENEFICIARY, persiste en NVS.
- */
-static public_key_t s_beneficiary_key;           /* Cle all-zeros = inactif */
-static uint16_t     s_forward_interval_min = 0;  /* 0 = inactif */
-static uint64_t     s_last_forward_ms = 0;       /* Dernier forward effectue */
-
-/* ================================================================
- * Fonctions wrapper pour le temps
- * ================================================================ */
-
-/**
- * @brief Retourne le temps monotonique en millisecondes.
- *
- * Wrapper autour de esp_timer_get_time() (microsecondes -> ms).
- * Utilisee comme source de temps pour le time_manager,
- * le wallet et la lock_table.
- */
-static uint64_t platform_get_monotonic_ms(void)
-{
-    return (uint64_t)(esp_timer_get_time() / 1000);
-}
-
-/**
- * @brief Wrapper get_time_ms pour le wallet et la lock_table.
- *
- * Delegue au time_manager pour obtenir le temps monotonique.
- */
-static uint64_t get_time_ms_wrapper(void)
-{
-    return time_manager_get_monotonic(&s_time_manager);
-}
-
-/**
- * @brief Wrapper pour obtenir un timestamp de TX.
- *
- * Delegue au time_manager (Lamport ou master-corrected).
- */
-static uint64_t get_tx_timestamp_wrapper(void)
-{
-    return time_manager_get_tx_timestamp(&s_time_manager);
-}
-
-/**
- * @brief Applique la fonte en attente sur un solde.
- *
- * Calcule les ticks ecoules depuis le dernier traitement de fonte,
- * applique la reduction, et met a jour le timestamp de reference
- * dans le wallet. Ne fait rien si la fonte est desactivee ou si
- * le mode TIME_MODE_MASTER n'est pas actif.
- *
- * Doit etre appelee sous le mutex s_state_mutex.
- *
- * @param balance [in,out] Solde a ajuster
- * @return Nombre de ticks appliques (0 si aucun)
- */
-static uint32_t apply_pending_melt(uint32_t *balance)
-{
-    if (!s_currency.melt_enabled) {
-        return 0;
-    }
-
-    /* La fonte requiert un temps fiable (mode MASTER) */
-    if (s_time_manager.mode != TIME_MODE_MASTER ||
-        !time_manager_has_valid_master(&s_time_manager)) {
-        return 0;
-    }
-
-    uint64_t now = get_time_ms_wrapper();
-    uint32_t ticks = currency_melt_ticks_due(&s_currency,
-                                              s_wallet.last_melt_timestamp,
-                                              now);
-    if (ticks == 0) {
-        return 0;
-    }
-
-    *balance = currency_melt_apply(&s_currency, *balance, ticks);
-    s_wallet.last_melt_timestamp = currency_melt_next_timestamp(
-        &s_currency, s_wallet.last_melt_timestamp, ticks, now);
-
-    ESP_LOGI(TAG, "Fonte appliquee: %"PRIu32" ticks, nouveau solde=%"PRIu32,
-             ticks, *balance);
-
-    return ticks;
-}
-
-/**
- * @brief Calcule le solde apres fonte sans modifier l'etat du wallet.
- *
- * Utilisee pour l'affichage UI (lecture seule, pas de mutation).
- *
- * @param balance Solde brut (avant fonte)
- * @return Solde apres fonte theorique
- */
-static uint32_t compute_melted_balance(uint32_t balance)
-{
-    if (!s_currency.melt_enabled) {
-        return balance;
-    }
-
-    if (s_time_manager.mode != TIME_MODE_MASTER ||
-        !time_manager_has_valid_master(&s_time_manager)) {
-        return balance;
-    }
-
-    uint64_t now = get_time_ms_wrapper();
-    uint32_t ticks = currency_melt_ticks_due(&s_currency,
-                                              s_wallet.last_melt_timestamp,
-                                              now);
-    if (ticks == 0) {
-        return balance;
-    }
-
-    return currency_melt_apply(&s_currency, balance, ticks);
-}
-
-#ifdef MP_HAS_LORA
-/**
- * @brief Wrapper pour obtenir le compteur Lamport courant.
- *
- * Utilisee par lora_sync pour le broadcast TIME_SYNC.
- */
-static uint64_t get_lamport_wrapper(void)
-{
-    return time_manager_get_lamport(&s_time_manager);
-}
-
-/**
- * @brief Callback de collecte des TX a diffuser via LoRa.
- *
- * [Lot C item 7] Remplace l'ancien passage direct (dag, dag_mutex) au
- * composant lora_sync. Cette fonction prend le mutex applicatif,
- * parcourt le DAG, copie les TX CONFIRMED recentes dans le buffer de
- * sortie, puis rend la main. lora_sync_task n'a donc plus a connaitre
- * ni le DAG ni le mutex.
- *
- * Le timeout d'acquisition du mutex (1 s) est conserve par parallelisme
- * avec l'ancien code : si core_task tient le mutex trop longtemps, ce
- * cycle de sync est saute (logge en WARN) ; le prochain cycle reessaiera.
- *
- * Implemente la signature lora_collect_confirmed_txs_fn.
- *
- * @param since_ts       Ne copier que les TX avec timestamp > since_ts
- * @param out_buf        Buffer de sortie
- * @param max_count      Capacite max de out_buf
- * @param out_newest_ts  [out] Plus grand timestamp copie (ou since_ts)
- * @param ctx            Inutilise (s_dag et s_state_mutex sont statiques)
- * @return Nombre de TX copiees
- */
-static uint32_t main_collect_confirmed_txs(uint64_t        since_ts,
-                                            transaction_t  *out_buf,
-                                            uint32_t        max_count,
-                                            uint64_t       *out_newest_ts,
-                                            void           *ctx)
-{
-    (void)ctx;
-    if (!out_buf || !out_newest_ts || max_count == 0) {
-        if (out_newest_ts) *out_newest_ts = since_ts;
-        return 0;
-    }
-
-    uint64_t newest = since_ts;
-    uint32_t written = 0;
-
-    if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGW(TAG, "Sync LoRa : impossible d'acquerir s_state_mutex, "
-                      "cycle saute");
-        *out_newest_ts = newest;
-        return 0;
-    }
-
-    for (uint32_t i = 0; i < s_dag.count && written < max_count; i++) {
-        const transaction_t *tx = &s_dag.transactions[i];
-        if (tx->status == TX_STATUS_CONFIRMED && tx->timestamp > since_ts) {
-            memcpy(&out_buf[written], tx, sizeof(transaction_t));
-            if (tx->timestamp > newest) newest = tx->timestamp;
-            written++;
-        }
-    }
-
-    xSemaphoreGive(s_state_mutex);
-
-    *out_newest_ts = newest;
-    return written;
-}
-#endif
+/* Etat global et fonctions wrappers temps deplaces dans app_state.{h,c}
+ * et time_glue.{h,c} au Lot D (2026-05-13). */
 
 /* ================================================================
  * Debug console callbacks (composant debug_console)
@@ -815,47 +384,7 @@ static void main_debug_dump_time(debug_console_writer_fn writer, void *ctx)
 
 #endif /* CONFIG_MESHPAY_DEBUG_CONSOLE */
 
-/* ================================================================
- * Stack monitoring [Lot C item 8]
- *
- * Tache leger qui loggue toutes les STACK_MONITOR_PERIOD_MS la marge
- * restante (high-water-mark) de chaque tache FreeRTOS critique. Permet
- * d'ajuster les tailles de stack en production sans devoir reflasher
- * un build instrumente : une marge < 512 mots signale un risque
- * d'overflow.
- *
- * Note : uxTaskGetStackHighWaterMark retourne le MINIMUM de mots libres
- * observe depuis le boot — c'est donc une valeur monotone decroissante
- * dans le pire cas.
- * ================================================================ */
-
-static const char *const s_monitored_tasks[] = {
-    "espnow", "lora", "core", "ui", "stkmon", NULL,
-};
-
-static void stack_monitor_task(void *param)
-{
-    (void)param;
-    const TickType_t period = pdMS_TO_TICKS(STACK_MONITOR_PERIOD_MS);
-    for (;;) {
-        vTaskDelay(period);
-        for (int i = 0; s_monitored_tasks[i]; i++) {
-            /* Skip notre propre tache (Lot E.6) : auto-mesurer
-             * uxTaskGetStackHighWaterMark sur soi-meme + ESP_LOGI
-             * consomme une portion non negligeable de la stack et
-             * peut declencher un overflow sur cette tache deja
-             * dimensionnee au plus juste. La HWM des autres taches
-             * suffit pour le diagnostic d'overflow. */
-            if (strcmp(s_monitored_tasks[i], "stkmon") == 0) continue;
-
-            TaskHandle_t h = xTaskGetHandle(s_monitored_tasks[i]);
-            if (!h) continue;  /* tache non lancee (selon target ESP32/S3) */
-            UBaseType_t hwm_words = uxTaskGetStackHighWaterMark(h);
-            ESP_LOGI(TAG, "Stack HWM %-7s : %u mots libres",
-                     s_monitored_tasks[i], (unsigned)hwm_words);
-        }
-    }
-}
+/* Stack monitoring deplace dans stack_monitor.{h,c} au Lot D. */
 
 /* ================================================================
  * Persistance NVS
@@ -1112,92 +641,8 @@ static esp_err_t load_or_generate_alias(void)
     return ESP_OK;
 }
 
-/* ================================================================
- * Configuration currency (hardcodee pour l'instant)
- * ================================================================ */
-
-/**
- * @brief Initialise la configuration de la monnaie.
- *
- * Configuration par defaut — sera remplacee par un chargement
- * depuis NVS ou une reception via LoRa dans une version future.
- */
-static void init_currency_config(void)
-{
-    memset(&s_currency, 0, sizeof(currency_config_t));
-
-    s_currency.currency_id = 0x00000001;
-    strncpy(s_currency.name, "TestCoin", CURRENCY_NAME_MAX);
-    strncpy(s_currency.symbol, "TST", CURRENCY_SYMBOL_MAX);
-    strncpy(s_currency.description, "Monnaie de test", CURRENCY_DESCRIPTION_MAX);
-    s_currency.decimals = 2;
-
-    /* Pas de plafond de supply, pas d'expiration */
-    s_currency.max_supply = 0;
-    s_currency.valid_until = 0;
-
-    /* Solde initial au premier boot */
-    s_currency.initial_balance = 1000;
-
-    /* Regles de transfert */
-    s_currency.min_transfer_amount = 1;
-    s_currency.max_transfer_amount = 0;    /* pas de plafond */
-    s_currency.transfer_fee = 0;           /* pas de frais */
-    s_currency.transfer_cooldown_ms = 0;   /* pas de cooldown */
-
-    /* Fonte (monnaie fondante) — appliquee uniquement en TIME_MODE_MASTER */
-    s_currency.melt_enabled = true;
-    s_currency.melt_period_seconds = 86400;       /* 1 tick = 1 jour */
-    s_currency.melt_volume_mode = MELT_MODE_BPS;
-    s_currency.melt_bps = 100;                     /* 1% par jour */
-    s_currency.melt_fixed_amount = 0;
-
-    /* Autorite MINT : notre propre cle (pour le premier boot) */
-    memcpy(&s_currency.mint_authorities[0], &s_keypair.public_key,
-           sizeof(public_key_t));
-    s_currency.mint_authority_count = 1;
-}
-
-/* ================================================================
- * Gestion des peers
- * ================================================================ */
-
-/**
- * @brief Ajoute un peer a la table (ignore les doublons).
- */
-static void add_peer(const comm_peer_info_t *peer)
-{
-    /* Verifier si le peer existe deja */
-    for (uint32_t i = 0; i < s_peer_count; i++) {
-        if (public_key_equal(&s_peers[i].public_key, &peer->public_key)) {
-            return;  /* Deja connu */
-        }
-    }
-
-    if (s_peer_count >= MAX_PEERS) {
-        ESP_LOGW(TAG, "Table des peers pleine, ignore nouveau peer");
-        return;
-    }
-
-    memcpy(&s_peers[s_peer_count], peer, sizeof(comm_peer_info_t));
-    s_peer_count++;
-    ESP_LOGI(TAG, "Nouveau peer decouvert (%"PRIu32"/%d)", s_peer_count, MAX_PEERS);
-}
-
-/**
- * @brief Recherche l'adresse MAC d'un peer par sa cle publique.
- *
- * @return Pointeur vers le mac_addr du peer, ou NULL si non trouve
- */
-static const uint8_t *find_peer_mac(const public_key_t *key)
-{
-    for (uint32_t i = 0; i < s_peer_count; i++) {
-        if (public_key_equal(&s_peers[i].public_key, key)) {
-            return s_peers[i].mac_addr;
-        }
-    }
-    return NULL;
-}
+/* init_currency_config deplace dans currency_config_init.{h,c} au Lot D.
+ * add_peer / find_peer_mac deplaces dans peers.{h,c} au Lot D. */
 
 /* ================================================================
  * Nonce monotone par emetteur (I3)
