@@ -48,28 +48,11 @@ uint64_t get_time_ms_wrapper(void);
  */
 uint64_t get_tx_timestamp_wrapper(void);
 
-#ifdef MP_HAS_LORA
-/**
- * @brief Wrapper pour obtenir le compteur Lamport courant.
- *        Utilise par lora_sync pour le broadcast TIME_SYNC.
+/*
+ * get_lamport_wrapper et main_collect_confirmed_txs sont desormais prives
+ * a transport/transport_lora.c (Lot D.3) — ils servaient uniquement a
+ * lora_sync_task, qui est cree par la facade LoRa.
  */
-uint64_t get_lamport_wrapper(void);
-
-/**
- * @brief Callback de collecte des TX a diffuser via LoRa.
- *
- * Prend s_state_mutex (timeout 1 s), parcourt s_dag, copie les TX
- * CONFIRMED dont timestamp > since_ts dans out_buf. Si le mutex est
- * indisponible, le cycle est saute (logge en WARN) et retourne 0.
- *
- * Implemente la signature lora_collect_confirmed_txs_fn (composant lora_sync).
- */
-uint32_t main_collect_confirmed_txs(uint64_t       since_ts,
-                                    transaction_t *out_buf,
-                                    uint32_t       max_count,
-                                    uint64_t      *out_newest_ts,
-                                    void          *ctx);
-#endif /* MP_HAS_LORA */
 
 /**
  * @brief Applique la fonte en attente sur un solde (mutation wallet).

@@ -81,53 +81,5 @@ uint32_t compute_melted_balance(uint32_t balance)
     return currency_melt_apply(&s_currency, balance, ticks);
 }
 
-#ifdef MP_HAS_LORA
-
-uint64_t get_lamport_wrapper(void)
-{
-    return time_manager_get_lamport(&s_time_manager);
-}
-
-uint32_t main_collect_confirmed_txs(uint64_t       since_ts,
-                                    transaction_t *out_buf,
-                                    uint32_t       max_count,
-                                    uint64_t      *out_newest_ts,
-                                    void          *ctx)
-{
-    (void)ctx;
-    if (!out_buf || !out_newest_ts || max_count == 0) {
-        if (out_newest_ts) *out_newest_ts = since_ts;
-        return 0;
-    }
-
-    uint64_t newest  = since_ts;
-    uint32_t written = 0;
-
-    /*
-     * Timeout 1 s (conserve par parallelisme avec l'ancien code) :
-     * si core_task tient le mutex trop longtemps, on saute ce cycle ;
-     * le prochain reessaiera.
-     */
-    if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGW(TAG, "Sync LoRa : impossible d'acquerir s_state_mutex, "
-                      "cycle saute");
-        *out_newest_ts = newest;
-        return 0;
-    }
-
-    for (uint32_t i = 0; i < s_dag.count && written < max_count; i++) {
-        const transaction_t *tx = &s_dag.transactions[i];
-        if (tx->status == TX_STATUS_CONFIRMED && tx->timestamp > since_ts) {
-            memcpy(&out_buf[written], tx, sizeof(transaction_t));
-            if (tx->timestamp > newest) newest = tx->timestamp;
-            written++;
-        }
-    }
-
-    xSemaphoreGive(s_state_mutex);
-
-    *out_newest_ts = newest;
-    return written;
-}
-
-#endif /* MP_HAS_LORA */
+/* Les wrappers LoRa (get_lamport_wrapper, main_collect_confirmed_txs)
+ * sont desormais prives a transport/transport_lora.c (Lot D.3). */

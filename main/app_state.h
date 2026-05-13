@@ -64,10 +64,11 @@
 #ifdef MP_HAS_ESPNOW
 #include "comm/espnow.h"
 #endif
-#ifdef MP_HAS_LORA
-#include "comm/lora_sync.h"
-#include "hal/hal_lora.h"
-#endif
+/*
+ * NB Lot D.3 : les types LoRa (hal_lora_t, lora_sync_config_t) sont
+ * consommes uniquement par transport/transport_lora.c. On n'inclut plus
+ * les headers ici pour eviter que app_state.h porte la transitive.
+ */
 
 /* ================================================================
  * Constantes globales (queues, stacks, priorites, NVS, etc.)
@@ -124,15 +125,10 @@
 /** Capacite max de la table des peers. */
 #define MAX_PEERS  10
 
-#ifdef MP_HAS_LORA
-/** Pins LoRa Wio-E5 (UART2) — ESP32 CYD uniquement. */
-#define LORA_UART_NUM    2
-#define LORA_TX_PIN     17
-#define LORA_RX_PIN     16
-
-/** Intervalle de sync LoRa (ms). */
-#define LORA_SYNC_INTERVAL_MS  120000
-#endif /* MP_HAS_LORA */
+/*
+ * Pins LoRa Wio-E5 et intervalle de sync : deplaces dans transport_lora.c
+ * (Lot D.3, prives a l'impl reelle).
+ */
 
 /** Cache anti-boucle pour les broadcasts (taille du buffer circulaire). */
 #define MAX_SEEN_BROADCASTS 16
@@ -179,9 +175,7 @@ extern hal_display_t      s_display;
 #ifdef MP_HAS_ESPNOW
 extern espnow_hal_t       s_espnow_hal;
 #endif
-#ifdef MP_HAS_LORA
-extern hal_lora_t         s_lora_hal;
-#endif
+/* s_lora_hal est prive a transport/transport_lora.c (Lot D.3). */
 
 /* Communication inter-taches. */
 extern QueueHandle_t      s_evt_queue;
@@ -213,12 +207,7 @@ extern bool                 s_broadcast_pending;
 extern signature_t s_seen_bcast[MAX_SEEN_BROADCASTS];
 extern uint32_t    s_seen_bcast_count;
 
-#ifdef MP_HAS_LORA
-/* Relay broadcast LoRa (rempli sous mutex, consomme apres release). */
-extern uint8_t  s_relay_bcast_buf[COMM_MSG_LORA_MAX];
-extern size_t   s_relay_bcast_len;
-extern bool     s_relay_bcast_pending;
-#endif
+/* Buffers de relay/pong LoRa : prives a transport/transport_lora.c (Lot D.3). */
 
 /* Alias du device (charge depuis NVS ou genere au premier boot). */
 extern char    s_device_alias[COMM_MSG_ALIAS_MAX + 1];
@@ -234,19 +223,7 @@ extern bool          s_ping_active;
 extern seen_ping_entry_t s_seen_pings[MAX_SEEN_PINGS];
 extern uint32_t          s_seen_ping_count;
 
-#ifdef MP_HAS_LORA
-/* Relay PING LoRa. */
-extern uint8_t  s_relay_ping_buf[COMM_MSG_PING_SIZE];
-extern size_t   s_relay_ping_len;
-extern bool     s_relay_ping_pending;
-
-/* PONG differe (envoi hors mutex apres delai jitter). */
-extern uint8_t    s_pong_buf[COMM_MSG_LORA_MAX];
-extern size_t     s_pong_len;
-extern bool       s_pong_pending;
-extern uint32_t   s_pong_delay_ms;
-extern TickType_t s_pong_start_tick;
-#endif
+/* s_relay_ping_*, s_pong_* : prives a transport/transport_lora.c (Lot D.3). */
 
 /* Auto-forward beneficiaire. */
 extern public_key_t s_beneficiary_key;

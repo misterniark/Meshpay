@@ -30,9 +30,7 @@ hal_display_t      s_display;
 #ifdef MP_HAS_ESPNOW
 espnow_hal_t       s_espnow_hal;
 #endif
-#ifdef MP_HAS_LORA
-hal_lora_t         s_lora_hal;
-#endif
+/* s_lora_hal : prive a transport/transport_lora.c (Lot D.3). */
 
 /* ================================================================
  * Communication inter-taches
@@ -71,11 +69,7 @@ bool                 s_broadcast_pending = false;
 signature_t s_seen_bcast[MAX_SEEN_BROADCASTS];
 uint32_t    s_seen_bcast_count = 0;
 
-#ifdef MP_HAS_LORA
-uint8_t  s_relay_bcast_buf[COMM_MSG_LORA_MAX];
-size_t   s_relay_bcast_len = 0;
-bool     s_relay_bcast_pending = false;
-#endif
+/* s_relay_bcast_* deplaces dans transport/transport_lora.c (Lot D.3). */
 
 /* ================================================================
  * Alias du device
@@ -96,17 +90,7 @@ bool          s_ping_active       = false;
 seen_ping_entry_t s_seen_pings[MAX_SEEN_PINGS];
 uint32_t          s_seen_ping_count = 0;
 
-#ifdef MP_HAS_LORA
-uint8_t  s_relay_ping_buf[COMM_MSG_PING_SIZE];
-size_t   s_relay_ping_len = 0;
-bool     s_relay_ping_pending = false;
-
-uint8_t    s_pong_buf[COMM_MSG_LORA_MAX];
-size_t     s_pong_len = 0;
-bool       s_pong_pending = false;
-uint32_t   s_pong_delay_ms = 0;
-TickType_t s_pong_start_tick = 0;
-#endif
+/* s_relay_ping_*, s_pong_* deplaces dans transport/transport_lora.c (Lot D.3). */
 
 /* ================================================================
  * Auto-forward beneficiaire

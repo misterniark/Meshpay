@@ -82,13 +82,9 @@ static const char *TAG = "main";
 
 extern hal_err_t hal_storage_esp32_create(hal_storage_t *storage);
 
-#ifdef MP_HAS_ESPNOW
 extern hal_err_t espnow_hal_esp32_create(espnow_hal_t *hal);
-#endif
-#ifdef MP_HAS_LORA
-extern hal_err_t hal_lora_wio_e5_create(hal_lora_t *lora,
-                                        int uart_num, int tx_pin, int rx_pin);
-#endif
+/* HAL LoRa factory : declaration deplacee dans transport/transport_lora.c
+ * (Lot D.3). Le code applicatif passe par transport_lora_init_and_start. */
 #if CONFIG_IDF_TARGET_ESP32
 extern hal_err_t hal_display_ili9341_create(hal_display_t *display);
 #elif CONFIG_IDF_TARGET_ESP32S3
@@ -402,6 +398,9 @@ static void main_debug_dump_time(debug_console_writer_fn writer, void *ctx)
 #include "persistence/nvs_next_seq.h"
 #include "persistence/nvs_beneficiary.h"
 
+/* Facade LoRa (Lot D.3) — voir transport/transport_lora.h pour le pourquoi. */
+#include "transport/transport_lora.h"
+
 /* ================================================================
  * Calcul de solde coherent checkpoint + DAG
  * ================================================================ */
@@ -643,8 +642,7 @@ static void handle_tx_received(const comm_event_t *evt)
         /* Confirmer la TX dans le DAG */
         dag_set_status(&s_dag, &rx_tx->id, TX_STATUS_CONFIRMED);
 
-#ifdef MP_HAS_ESPNOW
-        /* Envoyer ACK via ESP-NOW (courte portée, direct à l'émetteur) */
+        /* Envoyer ACK via ESP-NOW (courte portée, direct à l'émetteur). */
         const uint8_t *dest_mac = find_peer_mac(&rx_tx->from);
         if (dest_mac != NULL) {
             comm_cmd_t cmd;
@@ -654,26 +652,15 @@ static void handle_tx_received(const comm_event_t *evt)
             memcpy(cmd.data.send_ack.dest_mac, dest_mac, 6);
             xQueueSend(s_cmd_queue, &cmd, 0);
         }
-#endif
 
-#ifdef MP_HAS_LORA
         /*
          * [I2-fix] Diffuser aussi une ATTESTATION signée en LoRa.
          *
          * L'ACK ESP-NOW ne couvre que les pairs à courte portée (~200m).
          * L'attestation LoRa (~2km) permet au reste du réseau de savoir
-         * que cette TX est confirmée — sans cela, les pairs qui reçoivent
-         * la TX en sync LoRa la gardent en LOCKED pour toujours (le champ
-         * status est forcé à LOCKED en réception par durcissement).
-         *
-         * La signature Ed25519 couvre tx_id (32 octets). Les récepteurs
-         * vérifient signature + que attester_key == tx.to avant de
-         * promouvoir la TX à CONFIRMED localement.
-         *
-         * NB : l'ESP32-S3 étant actuellement client-only (pas de LoRa),
-         * il ne peut pas émettre d'attestation. Les devices ESP32 dans
-         * son environnement le feront quand ils recevront la TX via LoRa.
-         * Une évolution future (LoRa sur ESP32-S3) permettra l'autonomie.
+         * que cette TX est confirmée. Sur cibles sans LoRa (ESP32-S3),
+         * `transport_lora_send` est un no-op : ce sont les voisins ESP32
+         * qui emettront l'attestation en LoRa.
          */
         signature_t att_sig;
         if (crypto_sign(rx_tx->id.bytes, CRYPTO_HASH_SIZE,
@@ -684,15 +671,11 @@ static void handle_tx_received(const comm_event_t *evt)
                                           &s_keypair.public_key,
                                           &att_sig, &rx_tx->id,
                                           &att_len) == 0) {
-                hal_err_t herr = s_lora_hal.send(att_buf, att_len, s_lora_hal.ctx);
-                if (herr != HAL_OK) {
-                    ESP_LOGW(TAG, "Echec envoi attestation LoRa: %d", herr);
-                }
+                transport_lora_send(att_buf, att_len, "attestation");
             }
         } else {
             ESP_LOGE(TAG, "Echec signature attestation");
         }
-#endif
 
         ESP_LOGI(TAG, "TX confirmée + ACK/attestation diffusés (amount=%"PRIu32")",
                  rx_tx->amount);
@@ -945,20 +928,22 @@ static void handle_broadcast_received(const comm_event_t *evt)
     ESP_LOGI(TAG, "Broadcast maitre accepte (%u chars): \"%.*s\"",
              bcast->text_len, bcast->text_len, bcast->text);
 
-#ifdef MP_HAS_LORA
     /*
      * 5. Preparer le relay LoRa.
-     * On re-packe le message original (meme pubkey + sig du maitre)
-     * dans un buffer. Le relay effectif se fera apres release du mutex
-     * dans core_task, avec un delai aleatoire pour eviter les collisions.
+     * Sur stub : transport_lora_queue_relay_broadcast est no-op.
+     * Sur reel : copie dans le buffer interne, envoye apres delai
+     * aleatoire dans transport_lora_pump() (anti-collision).
      */
-    if (comm_msg_pack_broadcast(s_relay_bcast_buf, sizeof(s_relay_bcast_buf),
-                                &bcast->sender_key, &bcast->signature,
-                                bcast->text, bcast->text_len,
-                                &s_relay_bcast_len) == 0) {
-        s_relay_bcast_pending = true;
+    {
+        uint8_t relay_buf[COMM_MSG_LORA_MAX];
+        size_t  relay_len = 0;
+        if (comm_msg_pack_broadcast(relay_buf, sizeof(relay_buf),
+                                    &bcast->sender_key, &bcast->signature,
+                                    bcast->text, bcast->text_len,
+                                    &relay_len) == 0) {
+            transport_lora_queue_relay_broadcast(relay_buf, relay_len);
+        }
     }
-#endif
 }
 
 /* ================================================================
@@ -1038,24 +1023,19 @@ static void handle_ping_received(const comm_event_t *evt)
 
     ESP_LOGI(TAG, "Ping maitre recu (id=%u), envoi PONG", ping->ping_id);
 
-#ifdef MP_HAS_LORA
     /*
      * 3. Preparer le PONG avec notre identite (envoi differe).
      *
-     * Au lieu de bloquer avec vTaskDelay sous le mutex (ce qui gelait
-     * l'UI pendant 1-5 secondes), on stocke le PONG dans un buffer
-     * et on note le delai aleatoire. L'envoi effectif se fera hors
-     * mutex dans la boucle core_task une fois le delai ecoule.
+     * Au lieu de bloquer avec vTaskDelay sous mutex (ce qui gelait l'UI
+     * pendant 1-5 s), on file le PONG a la facade transport_lora qui le
+     * stocke dans un buffer interne. L'envoi reel se fait apres release
+     * du mutex dans transport_lora_pump(). Sur stub : no-op silencieux.
+     *
+     * [I4-fix] Signer le PONG pour empecher l'usurpation d'identite.
+     * On signe [ping_id:2 BE][alias_len:1][alias:N] avec la cle privee.
+     * Le recepteur verifie la signature contre device_key.
      */
     {
-        /*
-         * [I4-fix] Signer le PONG pour empecher l'usurpation d'identite.
-         * On signe [ping_id:2 BE][alias_len:1][alias:N] avec la cle
-         * privee du device. Le recepteur verifiera la signature contre
-         * device_key — si un attaquant forge un PONG avec une autre
-         * pubkey que la sienne, il ne pourra pas produire une signature
-         * valide.
-         */
         uint8_t sign_buf[2 + 1 + COMM_MSG_ALIAS_MAX];
         size_t sign_len = 0;
         sign_buf[sign_len++] = (uint8_t)(ping->ping_id >> 8);
@@ -1068,30 +1048,32 @@ static void handle_ping_received(const comm_event_t *evt)
         if (crypto_sign(sign_buf, sign_len, &s_keypair, &pong_sig) != ESP_OK) {
             ESP_LOGE(TAG, "Erreur signature PONG");
         } else {
+            uint8_t pong_buf[COMM_MSG_LORA_MAX];
             size_t pong_len;
-            if (comm_msg_pack_pong(s_pong_buf, sizeof(s_pong_buf),
+            if (comm_msg_pack_pong(pong_buf, sizeof(pong_buf),
                                    &s_keypair.public_key,
                                    &pong_sig,
                                    ping->ping_id,
                                    s_device_alias, s_device_alias_len,
                                    &pong_len) == 0) {
-                s_pong_len = pong_len;
-                s_pong_delay_ms = 1000 + (esp_random() % 4001);
-                s_pong_start_tick = xTaskGetTickCount();
-                s_pong_pending = true;
+                uint32_t delay_ms = 1000 + (esp_random() % 4001);
+                transport_lora_queue_pong_delayed(pong_buf, pong_len, delay_ms);
                 ESP_LOGI(TAG, "PONG signe prepare (envoi differe dans %lums)",
-                         (unsigned long)s_pong_delay_ms);
+                         (unsigned long)delay_ms);
             }
         }
     }
 
-    /* 4. Preparer le relay du PING (on reutilise la signature originale du maitre) */
-    if (comm_msg_pack_ping(s_relay_ping_buf, sizeof(s_relay_ping_buf),
-                           &ping->master_key, &ping->signature,
-                           ping->ping_id, &s_relay_ping_len) == 0) {
-        s_relay_ping_pending = true;
+    /* 4. Preparer le relay du PING (reutilise la signature originale du maitre). */
+    {
+        uint8_t  relay_buf[COMM_MSG_PING_SIZE];
+        size_t   relay_len = 0;
+        if (comm_msg_pack_ping(relay_buf, sizeof(relay_buf),
+                               &ping->master_key, &ping->signature,
+                               ping->ping_id, &relay_len) == 0) {
+            transport_lora_queue_relay_ping(relay_buf, relay_len);
+        }
     }
-#endif
 }
 
 /**
@@ -1523,8 +1505,7 @@ static esp_err_t initiate_payment(const public_key_t *to, uint32_t amount)
         goto done;
     }
 
-#ifdef MP_HAS_ESPNOW
-    /* 6. Envoyer via ESP-NOW */
+    /* 6. Envoyer via ESP-NOW. */
     const uint8_t *dest_mac = find_peer_mac(to);
     if (dest_mac != NULL) {
         comm_cmd_t cmd;
@@ -1535,11 +1516,12 @@ static esp_err_t initiate_payment(const public_key_t *to, uint32_t amount)
         xQueueSend(s_cmd_queue, &cmd, 0);
     } else {
         ESP_LOGW(TAG, "Destinataire non trouve dans la table des peers");
-        /* La TX est quand meme dans le DAG + lockee, elle sera sync via LoRa
-         * sur les cartes equipees de LoRa. Sur les autres (Waveshare S3),
-         * elle restera dans le DAG local jusqu'a une future decouverte. */
+        /*
+         * La TX est dans le DAG + locked, elle sera sync via LoRa sur les
+         * cartes equipees (CYD). Sur les autres (Waveshare S3), elle reste
+         * locale jusqu'a une future decouverte.
+         */
     }
-#endif
 
     ESP_LOGI(TAG, "Paiement initie: amount=%"PRIu32, amount);
     ret = ESP_OK;
@@ -1697,10 +1679,7 @@ esp_err_t broadcast_text_send(const char *text, uint8_t text_len)
         return ESP_FAIL;
     }
 
-    /* Envoyer via LoRa */
-    hal_err_t herr = s_lora_hal.send(buf, out_len, s_lora_hal.ctx);
-    if (herr != HAL_OK) {
-        ESP_LOGE(TAG, "Erreur envoi LoRa broadcast: %d", herr);
+    if (!transport_lora_send(buf, out_len, "broadcast")) {
         return ESP_FAIL;
     }
 
@@ -1761,9 +1740,7 @@ esp_err_t ping_send(void)
         return ESP_FAIL;
     }
 
-    hal_err_t herr = s_lora_hal.send(buf, out_len, s_lora_hal.ctx);
-    if (herr != HAL_OK) {
-        ESP_LOGE(TAG, "Erreur envoi LoRa PING: %d", herr);
+    if (!transport_lora_send(buf, out_len, "PING")) {
         return ESP_FAIL;
     }
 
@@ -1839,10 +1816,7 @@ esp_err_t set_alias_send(const public_key_t *target_key,
         return ESP_FAIL;
     }
 
-    /* Envoyer via LoRa */
-    hal_err_t herr = s_lora_hal.send(buf, out_len, s_lora_hal.ctx);
-    if (herr != HAL_OK) {
-        ESP_LOGE(TAG, "Erreur envoi LoRa SET_ALIAS: %d", herr);
+    if (!transport_lora_send(buf, out_len, "SET_ALIAS")) {
         return ESP_FAIL;
     }
 
@@ -1920,10 +1894,7 @@ esp_err_t set_beneficiary_send(const public_key_t *target_key,
         return ESP_FAIL;
     }
 
-    /* Envoyer via LoRa */
-    hal_err_t herr = s_lora_hal.send(buf, out_len, s_lora_hal.ctx);
-    if (herr != HAL_OK) {
-        ESP_LOGE(TAG, "Erreur envoi LoRa SET_BENEFICIARY: %d", herr);
+    if (!transport_lora_send(buf, out_len, "SET_BENEFICIARY")) {
         return ESP_FAIL;
     }
 
@@ -1983,16 +1954,12 @@ static void handle_ui_command(const ui_cmd_t *cmd)
 
         case UI_CMD_DISCOVER_PEERS:
             ESP_LOGI(TAG, "UI CMD: Discover peers");
-#ifdef MP_HAS_ESPNOW
             {
                 comm_cmd_t disc_cmd;
                 memset(&disc_cmd, 0, sizeof(disc_cmd));
                 disc_cmd.type = COMM_CMD_START_DISCOVER;
                 xQueueSend(s_cmd_queue, &disc_cmd, pdMS_TO_TICKS(100));
             }
-#else
-            ESP_LOGW(TAG, "DISCOVER non disponible sur ce device (pas d'ESP-NOW)");
-#endif
             break;
 
         case UI_CMD_BROADCAST_TEXT:
@@ -2142,72 +2109,12 @@ static void core_task(void *param)
 
         xSemaphoreGive(s_state_mutex);
 
-#ifdef MP_HAS_LORA
         /*
-         * Relay broadcast LoRa (hors mutex).
-         *
-         * On attend un delai aleatoire (200-1000ms) avant de retransmettre
-         * pour eviter que tous les devices relayent en meme temps et
-         * provoquent des collisions sur le canal LoRa.
+         * Pomper les envois LoRa differes (relay broadcast/ping +
+         * PONG signe). Sur stub : no-op. Sur reel : applique les delais
+         * aleatoires anti-collision et appelle s_lora_hal.send.
          */
-        if (s_relay_bcast_pending) {
-            s_relay_bcast_pending = false;
-            uint32_t delay_ms = 200 + (esp_random() % 801);
-            vTaskDelay(pdMS_TO_TICKS(delay_ms));
-            hal_err_t herr = s_lora_hal.send(s_relay_bcast_buf,
-                                              s_relay_bcast_len,
-                                              s_lora_hal.ctx);
-            if (herr == HAL_OK) {
-                ESP_LOGI(TAG, "Broadcast relaye (delai=%lums)",
-                         (unsigned long)delay_ms);
-            } else {
-                ESP_LOGW(TAG, "Echec relay broadcast LoRa");
-            }
-        }
-
-        /*
-         * Relay PING LoRa (hors mutex).
-         * Meme principe que le relay broadcast : delai aleatoire
-         * pour eviter les collisions.
-         */
-        if (s_relay_ping_pending) {
-            s_relay_ping_pending = false;
-            uint32_t delay_ms = 200 + (esp_random() % 801);
-            vTaskDelay(pdMS_TO_TICKS(delay_ms));
-            hal_err_t herr = s_lora_hal.send(s_relay_ping_buf,
-                                              s_relay_ping_len,
-                                              s_lora_hal.ctx);
-            if (herr == HAL_OK) {
-                ESP_LOGI(TAG, "PING relaye (delai=%lums)",
-                         (unsigned long)delay_ms);
-            } else {
-                ESP_LOGW(TAG, "Echec relay PING LoRa");
-            }
-        }
-
-        /*
-         * Envoi differe du PONG (hors mutex).
-         *
-         * Le PONG a ete prepare dans handle_ping_received() avec un
-         * delai aleatoire (1-5s). On verifie ici si le delai est
-         * ecoule avant d'envoyer, evitant ainsi de bloquer core_task
-         * et le mutex pendant plusieurs secondes.
-         */
-        if (s_pong_pending) {
-            TickType_t elapsed = xTaskGetTickCount() - s_pong_start_tick;
-            if (elapsed >= pdMS_TO_TICKS(s_pong_delay_ms)) {
-                s_pong_pending = false;
-                hal_err_t herr = s_lora_hal.send(s_pong_buf, s_pong_len,
-                                                  s_lora_hal.ctx);
-                if (herr == HAL_OK) {
-                    ESP_LOGI(TAG, "PONG envoye (delai=%lums)",
-                             (unsigned long)s_pong_delay_ms);
-                } else {
-                    ESP_LOGW(TAG, "Echec envoi PONG");
-                }
-            }
-        }
-#endif
+        transport_lora_pump();
     }
 }
 
@@ -2475,48 +2382,35 @@ void app_main(void)
     hal_display_jd9853_create(&s_display);
 #endif
 
-#ifdef MP_HAS_ESPNOW
     if (espnow_hal_esp32_create(&s_espnow_hal) != HAL_OK) {
         ESP_LOGE(TAG, "ESP-NOW HAL init echoue");
         return;
     }
-#endif
 
-#ifdef MP_HAS_LORA
-    if (hal_lora_wio_e5_create(&s_lora_hal, LORA_UART_NUM,
-                                LORA_TX_PIN, LORA_RX_PIN) != HAL_OK) {
-        ESP_LOGW(TAG, "LoRa HAL init echoue (fonctionnement sans LoRa)");
-    }
-#endif
+    /* HAL LoRa + lora_sync_task (no-op sur cibles sans LoRa). */
+    (void)transport_lora_init_and_start();
 
-    ESP_LOGI(TAG, "[11/12] HAL initialises"
-#ifdef MP_HAS_ESPNOW
-             " + ESP-NOW"
-#endif
-#ifdef MP_HAS_LORA
-             " + LoRa"
-#endif
-            );
+    ESP_LOGI(TAG, "[11/12] HAL initialises (ESP-NOW%s)",
+             transport_lora_available() ? " + LoRa" : "");
 
     /* ---- 12. Queues, mutex et taches ---- */
     s_evt_queue = xQueueCreate(EVT_QUEUE_DEPTH, sizeof(comm_event_t));
     s_state_mutex = xSemaphoreCreateMutex();
 
-#ifdef MP_HAS_ESPNOW
     s_cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(comm_cmd_t));
     if (!s_cmd_queue) {
         ESP_LOGE(TAG, "Erreur creation s_cmd_queue");
         return;
     }
-#endif
 
     if (!s_evt_queue || !s_state_mutex) {
         ESP_LOGE(TAG, "Erreur creation queues/mutex");
         return;
     }
 
-#ifdef MP_HAS_ESPNOW
-    /* Configuration ESP-NOW task */
+    /* Configuration ESP-NOW task. ESP-NOW est present sur ESP32 + ESP32-S3
+     * (les deux cibles supportees actuellement) ; pas de garde
+     * conditionnelle ici. */
     static espnow_config_t espnow_cfg;
     memset(&espnow_cfg, 0, sizeof(espnow_cfg));
     espnow_cfg.hal = &s_espnow_hal;
@@ -2528,31 +2422,8 @@ void app_main(void)
 
     xTaskCreate(espnow_task, "espnow", ESPNOW_TASK_STACK, &espnow_cfg,
                 ESPNOW_TASK_PRIO, NULL);
-#endif
 
-#ifdef MP_HAS_LORA
-    /* Configuration LoRa sync task.
-     *
-     * [Lot C item 7] Le DAG et le mutex applicatif ne sont plus passes
-     * directement au composant : on lui fournit un callback de collecte
-     * qui gere lui-meme le verrouillage. Inversion de dependance
-     * propre, le composant lora_sync reste decouple. */
-    static lora_sync_config_t lora_cfg;
-    memset(&lora_cfg, 0, sizeof(lora_cfg));
-    lora_cfg.lora = &s_lora_hal;
-    lora_cfg.evt_queue = s_evt_queue;
-    lora_cfg.collect_confirmed_txs = main_collect_confirmed_txs;
-    lora_cfg.collect_ctx = NULL;
-    lora_cfg.sync_interval_ms = LORA_SYNC_INTERVAL_MS;
-    lora_cfg.is_master = false;
-    lora_cfg.get_time = get_time_ms_wrapper;
-    lora_cfg.own_pubkey = &s_keypair.public_key;
-    lora_cfg.own_keypair = &s_keypair;
-    lora_cfg.get_lamport = get_lamport_wrapper;
-
-    xTaskCreate(lora_sync_task, "lora", LORA_TASK_STACK, &lora_cfg,
-                LORA_TASK_PRIO, NULL);
-#endif
+    /* lora_sync_task est creee dans transport_lora_init_and_start (deja appele). */
 
     /* Tache core — commune aux deux targets */
     xTaskCreate(core_task, "core", CORE_TASK_STACK, NULL,
