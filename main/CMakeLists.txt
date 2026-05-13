@@ -33,6 +33,11 @@ set(meshpay_main_srcs
     "ops/op_mint.c"
     "ops/op_beneficiary_forward.c"
     "ops/op_master.c"
+    # Core task + UI dispatch + helpers partages (Lot D.6)
+    "balance.c"
+    "dag_glue.c"
+    "core_task.c"
+    "ui_dispatch.c"
 )
 
 # Lot D.3 : facade LoRa. Sur ESP32 (CYD) : impl reelle. Sur autres
