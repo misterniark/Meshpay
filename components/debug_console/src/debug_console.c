@@ -58,7 +58,10 @@
 #  include "esp_vfs_usb_serial_jtag.h"
 #elif CONFIG_ESP_CONSOLE_UART
 #  include "driver/uart.h"
-#  include "esp_vfs_dev.h"
+/* `driver/uart_vfs.h` est le remplacant de `esp_vfs_dev.h` depuis
+ * IDF v5.x. L'ancien header existe encore mais emet un deprecation
+ * warning a la compilation. */
+#  include "driver/uart_vfs.h"
 #endif
 
 static const char *TAG = "debug_console";
@@ -77,10 +80,11 @@ typedef struct {
 
 static debug_state_t s_state;
 
-/** Buffer ligne (input + formatage de sortie). Statique pour eviter
- *  de mordre dans la stack de la tache (qui est deja a 4 Ko et doit
- *  encaisser fgets + le travail des callbacks). */
-static char s_line_buf[CONFIG_MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE];
+/* Pas de buffer ligne global : la DRAM est saturee (dette technique
+ * « DRAM dram0_seg saturee »). Tous les buffers de formatage sont
+ * alloues localement sur la stack de la tache `dbg_console` (4 Ko,
+ * largement de marge pour un buffer ~512 octets). La tache etant
+ * mono-thread, pas de souci de concurrence. */
 
 /* ================================================================
  * Parser de commande (expose pour les tests)
@@ -198,31 +202,39 @@ static const char *cmd_name(debug_cmd_t cmd)
     }
 }
 
+/* Les marqueurs et lignes d'erreur sont courts (< 80 octets en
+ * pratique) ; un buffer local de 96 octets sur la stack du caller
+ * suffit, sans toucher la DRAM. */
+#define DBG_MARK_BUF_SIZE 96
+
 static void write_begin(const char *name, uint32_t seq)
 {
-    snprintf(s_line_buf, sizeof(s_line_buf),
+    char buf[DBG_MARK_BUF_SIZE];
+    snprintf(buf, sizeof(buf),
              "<<<MESHPAY_DEBUG %s BEGIN seq=%lu>>>",
              name, (unsigned long)seq);
-    default_writer(s_line_buf, NULL);
+    default_writer(buf, NULL);
 }
 
 static void write_end(const char *name)
 {
-    snprintf(s_line_buf, sizeof(s_line_buf),
+    char buf[DBG_MARK_BUF_SIZE];
+    snprintf(buf, sizeof(buf),
              "<<<MESHPAY_DEBUG %s END>>>",
              name);
-    default_writer(s_line_buf, NULL);
+    default_writer(buf, NULL);
 }
 
 static void write_err(const char *name, uint32_t seq, const char *err_code)
 {
-    snprintf(s_line_buf, sizeof(s_line_buf),
+    char buf[DBG_MARK_BUF_SIZE];
+    snprintf(buf, sizeof(buf),
              "<<<MESHPAY_DEBUG %s ERR seq=%lu>>>",
              name, (unsigned long)seq);
-    default_writer(s_line_buf, NULL);
-    snprintf(s_line_buf, sizeof(s_line_buf),
+    default_writer(buf, NULL);
+    snprintf(buf, sizeof(buf),
              "{\"err\":\"%s\"}", err_code);
-    default_writer(s_line_buf, NULL);
+    default_writer(buf, NULL);
     write_end(name);
 }
 
@@ -347,7 +359,8 @@ static esp_err_t console_io_init(void)
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }
-    esp_vfs_dev_uart_use_driver(port);
+    /* API renommee dans IDF v5.x (cf. include ci-dessus). */
+    uart_vfs_dev_use_driver(port);
     return ESP_OK;
 
 #else
@@ -375,10 +388,11 @@ static void debug_console_task(void *arg)
                       "polling sans blocage", (int)err);
     }
 
-    /* Buffer ligne local a la tache. On utilise un buffer different
-     * de s_line_buf pour eviter d'ecraser l'input si une commande
-     * en cours formate sa sortie. */
-    static char input_buf[CONFIG_MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE];
+    /* Buffer ligne local a la stack de la tache (pas `static` : on
+     * ne consomme pas de DRAM). Les commandes valides font moins de
+     * 16 caracteres ; 64 octets laissent de la marge pour de futurs
+     * arguments sans gonfler la stack. */
+    char input_buf[64];
 
     ESP_LOGI(TAG, "Console de debug demarree. Commandes : help, dump_dag, "
                   "dump_wallet, dump_currency, dump_time, dump_all.");

@@ -516,12 +516,17 @@ static uint32_t main_collect_confirmed_txs(uint64_t        since_ts,
 
 #if CONFIG_MESHPAY_DEBUG_CONSOLE
 
-/* Buffer ligne reutilise par les callbacks de dump. Reside dans le
- * .bss (static) plutot que sur la stack pour eviter de gonfler les
- * stacks de la tache dbg_console (4 Ko) pour chaque appel.
- * Acces concurrent impossible : tous les callbacks sont appeles en
- * sequence par la meme tache dbg_console. */
-static char s_dbg_line[CONFIG_MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE];
+/* Taille du buffer ligne utilise par les callbacks de dump. Le
+ * buffer lui-meme est alloue sur la stack a l'interieur de chaque
+ * callback : la DRAM est saturee (dette technique « DRAM dram0_seg
+ * saturee », ~60 octets de marge), on ne peut pas se permettre
+ * 384 octets de plus en .bss. La stack de la tache dbg_console
+ * (4 Ko) absorbe largement un buffer ~512 octets temporaire.
+ *
+ * Mono-thread garanti : tous les callbacks sont appeles en sequence
+ * par la meme tache dbg_console, donc pas de souci de re-entrance.
+ */
+#define DBG_LINE_SIZE CONFIG_MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE
 
 /** Helper : encode un buffer binaire en hex via le helper du composant. */
 static inline void dbg_hex(const uint8_t *src, size_t len, char *dst, size_t dst_size)
@@ -550,6 +555,7 @@ static const char *dbg_status_name(tx_status_t s)
  */
 static void main_debug_dump_dag(debug_console_writer_fn writer, void *ctx)
 {
+    char line[DBG_LINE_SIZE];
     const TickType_t to = pdMS_TO_TICKS(CONFIG_MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS);
     if (xSemaphoreTake(s_state_mutex, to) != pdTRUE) {
         writer("{\"err\":\"mutex_timeout\"}", ctx);
@@ -557,11 +563,11 @@ static void main_debug_dump_dag(debug_console_writer_fn writer, void *ctx)
     }
 
     /* Header : compte de TX et capacite max. */
-    snprintf(s_dbg_line, sizeof(s_dbg_line),
+    snprintf(line, sizeof(line),
              "{\"count\":%lu,\"max\":%lu}",
              (unsigned long)s_dag.count,
              (unsigned long)DAG_MAX_TRANSACTIONS);
-    writer(s_dbg_line, ctx);
+    writer(line, ctx);
 
     /* Buffers hex locaux (chaque hex = 2*32+1 = 65 octets). */
     char id_hex[CRYPTO_HASH_SIZE * 2 + 1];
@@ -579,7 +585,7 @@ static void main_debug_dump_dag(debug_console_writer_fn writer, void *ctx)
         /* Construction de la ligne en deux temps :
          *   1. partie scalaire jusqu'au '[' des parents,
          *   2. enumeration des parents (1 ou 2) puis fermeture ']}'. */
-        int n = snprintf(s_dbg_line, sizeof(s_dbg_line),
+        int n = snprintf(line, sizeof(line),
                          "{\"i\":%lu,\"id\":\"%s\",\"type\":\"%s\","
                          "\"from\":\"%s\",\"to\":\"%s\","
                          "\"amount\":%lu,\"currency\":%lu,\"fee\":%lu,"
@@ -596,16 +602,16 @@ static void main_debug_dump_dag(debug_console_writer_fn writer, void *ctx)
                          dbg_status_name(tx->status),
                          (unsigned long long)tx->timestamp);
 
-        for (uint8_t p = 0; p < tx->parent_count && n > 0 && n < (int)sizeof(s_dbg_line); p++) {
+        for (uint8_t p = 0; p < tx->parent_count && n > 0 && n < (int)sizeof(line); p++) {
             dbg_hex(tx->parents[p].bytes, sizeof(tx->parents[p].bytes),
                     parent_hex, sizeof(parent_hex));
-            n += snprintf(s_dbg_line + n, sizeof(s_dbg_line) - n,
+            n += snprintf(line + n, sizeof(line) - n,
                           "%s\"%s\"", p > 0 ? "," : "", parent_hex);
         }
-        if (n > 0 && n < (int)sizeof(s_dbg_line)) {
-            snprintf(s_dbg_line + n, sizeof(s_dbg_line) - n, "]}");
+        if (n > 0 && n < (int)sizeof(line)) {
+            snprintf(line + n, sizeof(line) - n, "]}");
         }
-        writer(s_dbg_line, ctx);
+        writer(line, ctx);
     }
 
     xSemaphoreGive(s_state_mutex);
@@ -621,6 +627,7 @@ static void main_debug_dump_dag(debug_console_writer_fn writer, void *ctx)
  */
 static void main_debug_dump_wallet(debug_console_writer_fn writer, void *ctx)
 {
+    char line[DBG_LINE_SIZE];
     const TickType_t to = pdMS_TO_TICKS(CONFIG_MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS);
     if (xSemaphoreTake(s_state_mutex, to) != pdTRUE) {
         writer("{\"err\":\"mutex_timeout\"}", ctx);
@@ -650,7 +657,7 @@ static void main_debug_dump_wallet(debug_console_writer_fn writer, void *ctx)
         if (s_lock_table.entries[i].active) active_locks++;
     }
 
-    snprintf(s_dbg_line, sizeof(s_dbg_line),
+    snprintf(line, sizeof(line),
              "{\"own\":\"%s\",\"alias\":\"%.*s\","
              "\"balance\":%lu,\"fee_recipient\":\"%s\","
              "\"last_melt_ts\":%llu,\"lock_count\":%lu,"
@@ -662,7 +669,7 @@ static void main_debug_dump_wallet(debug_console_writer_fn writer, void *ctx)
              (unsigned long long)s_wallet.last_melt_timestamp,
              (unsigned long)active_locks,
              (unsigned long)WALLET_MAX_LOCKS);
-    writer(s_dbg_line, ctx);
+    writer(line, ctx);
 
     /* Une ligne par lock actif. */
     char lock_hex[CRYPTO_HASH_SIZE * 2 + 1];
@@ -671,13 +678,13 @@ static void main_debug_dump_wallet(debug_console_writer_fn writer, void *ctx)
         if (!lk->active) continue;
         dbg_hex(lk->tx_id.bytes, sizeof(lk->tx_id.bytes),
                 lock_hex, sizeof(lock_hex));
-        snprintf(s_dbg_line, sizeof(s_dbg_line),
+        snprintf(line, sizeof(line),
                  "{\"i\":%lu,\"tx_id\":\"%s\","
                  "\"amount\":%lu,\"lock_time\":%llu}",
                  (unsigned long)i, lock_hex,
                  (unsigned long)lk->amount,
                  (unsigned long long)lk->lock_time);
-        writer(s_dbg_line, ctx);
+        writer(line, ctx);
     }
 
     xSemaphoreGive(s_state_mutex);
@@ -695,13 +702,14 @@ static void main_debug_dump_wallet(debug_console_writer_fn writer, void *ctx)
  */
 static void main_debug_dump_currency(debug_console_writer_fn writer, void *ctx)
 {
+    char line[DBG_LINE_SIZE];
     const TickType_t to = pdMS_TO_TICKS(CONFIG_MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS);
     if (xSemaphoreTake(s_state_mutex, to) != pdTRUE) {
         writer("{\"err\":\"mutex_timeout\"}", ctx);
         return;
     }
 
-    snprintf(s_dbg_line, sizeof(s_dbg_line),
+    snprintf(line, sizeof(line),
              "{\"id\":%lu,\"name\":\"%s\",\"symbol\":\"%s\","
              "\"decimals\":%u,\"max_supply\":%llu,"
              "\"valid_until\":%llu,\"initial_balance\":%lu,"
@@ -722,16 +730,16 @@ static void main_debug_dump_currency(debug_console_writer_fn writer, void *ctx)
              (unsigned)s_currency.melt_bps,
              (unsigned long)s_currency.melt_fixed_amount,
              (unsigned)s_currency.mint_authority_count);
-    writer(s_dbg_line, ctx);
+    writer(line, ctx);
 
     char auth_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
     for (uint8_t i = 0; i < s_currency.mint_authority_count; i++) {
         dbg_hex(s_currency.mint_authorities[i].bytes,
                 sizeof(s_currency.mint_authorities[i].bytes),
                 auth_hex, sizeof(auth_hex));
-        snprintf(s_dbg_line, sizeof(s_dbg_line),
+        snprintf(line, sizeof(line),
                  "{\"i\":%u,\"pubkey\":\"%s\"}", (unsigned)i, auth_hex);
-        writer(s_dbg_line, ctx);
+        writer(line, ctx);
     }
 
     xSemaphoreGive(s_state_mutex);
@@ -746,6 +754,7 @@ static void main_debug_dump_currency(debug_console_writer_fn writer, void *ctx)
  */
 static void main_debug_dump_time(debug_console_writer_fn writer, void *ctx)
 {
+    char line[DBG_LINE_SIZE];
     const TickType_t to = pdMS_TO_TICKS(CONFIG_MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS);
     if (xSemaphoreTake(s_state_mutex, to) != pdTRUE) {
         writer("{\"err\":\"mutex_timeout\"}", ctx);
@@ -757,7 +766,7 @@ static void main_debug_dump_time(debug_console_writer_fn writer, void *ctx)
             sizeof(s_time_manager.current_master_key.bytes),
             master_hex, sizeof(master_hex));
 
-    snprintf(s_dbg_line, sizeof(s_dbg_line),
+    snprintf(line, sizeof(line),
              "{\"mode\":\"%s\",\"lamport\":%llu,"
              "\"master_valid\":%s,\"master_offset_ms\":%lld,"
              "\"last_master_update\":%llu,\"master_key\":\"%s\"}",
@@ -767,7 +776,7 @@ static void main_debug_dump_time(debug_console_writer_fn writer, void *ctx)
              (long long)s_time_manager.master_offset_ms,
              (unsigned long long)s_time_manager.last_master_update,
              master_hex);
-    writer(s_dbg_line, ctx);
+    writer(line, ctx);
 
     xSemaphoreGive(s_state_mutex);
 }
