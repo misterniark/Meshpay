@@ -22,6 +22,12 @@ set(meshpay_main_srcs
     "persistence/nvs_alias.c"
     "persistence/nvs_next_seq.c"
     "persistence/nvs_beneficiary.c"
+    # Handlers d'evenements (Lot D.4)
+    "handlers/handler_payment.c"
+    "handlers/handler_time_sync.c"
+    "handlers/handler_broadcast.c"
+    "handlers/handler_ping_pong.c"
+    "handlers/handler_admin.c"
 )
 
 # Lot D.3 : facade LoRa. Sur ESP32 (CYD) : impl reelle. Sur autres
