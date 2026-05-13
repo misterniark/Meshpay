@@ -28,6 +28,11 @@ set(meshpay_main_srcs
     "handlers/handler_broadcast.c"
     "handlers/handler_ping_pong.c"
     "handlers/handler_admin.c"
+    # Operations initiees localement (Lot D.5)
+    "ops/op_payment.c"
+    "ops/op_mint.c"
+    "ops/op_beneficiary_forward.c"
+    "ops/op_master.c"
 )
 
 # Lot D.3 : facade LoRa. Sur ESP32 (CYD) : impl reelle. Sur autres

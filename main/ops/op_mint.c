@@ -1,0 +1,81 @@
+/**
+ * @file ops/op_mint.c
+ * @brief Cree une TX MINT (maitre uniquement).
+ *
+ * Verifie que le device est present dans `s_currency.mint_authorities`.
+ * Insere la TX MINT dans le DAG + checkpoint automatique.
+ *
+ * Appele sous s_state_mutex (cf. [C1-fix]).
+ */
+
+#include "ops.h"
+
+#include <inttypes.h>
+#include <string.h>
+
+#include "esp_log.h"
+
+#include "app_state.h"
+#include "dag_glue.h"
+#include "persistence/nvs_next_seq.h"
+#include "time_glue.h"
+#include "transaction/tx_create.h"
+
+static const char *TAG = "op_mint";
+
+esp_err_t initiate_mint(const public_key_t *to, uint32_t amount)
+{
+    if (to == NULL || amount == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    bool is_master = false;
+    for (uint8_t i = 0; i < s_currency.mint_authority_count; i++) {
+        if (memcmp(s_keypair.public_key.bytes,
+                   s_currency.mint_authorities[i].bytes,
+                   CRYPTO_PUBLIC_KEY_SIZE) == 0) {
+            is_master = true;
+            break;
+        }
+    }
+    if (!is_master) {
+        ESP_LOGW(TAG, "MINT refuse : device non maitre");
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
+    /* Tips du DAG comme parents (genese si DAG vide). */
+    const transaction_t *tips[2];
+    uint32_t tip_count = 0;
+    dag_get_tips(&s_dag, tips, 2, &tip_count);
+
+    hash_t parents[2];
+    uint8_t parent_count;
+    if (tip_count == 0) {
+        memset(&parents[0], 0, sizeof(hash_t));
+        parent_count = 1;
+    } else {
+        parent_count = (tip_count > 2) ? 2 : (uint8_t)tip_count;
+        for (uint8_t i = 0; i < parent_count; i++) {
+            memcpy(&parents[i], &tips[i]->id, sizeof(hash_t));
+        }
+    }
+
+    transaction_t mint_tx;
+    esp_err_t ret = tx_create_mint(&mint_tx, &s_keypair, to, amount,
+                                   s_currency.currency_id,
+                                   next_seq(),
+                                   parents, parent_count,
+                                   get_tx_timestamp_wrapper());
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Erreur creation MINT: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = dag_insert_and_track(&mint_tx);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Erreur insertion MINT dans DAG: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "MINT cree: %"PRIu32" credits", amount);
+    }
+    return ret;
+}
