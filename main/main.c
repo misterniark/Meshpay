@@ -77,6 +77,10 @@
 /* UI */
 #include "ui/ui_state.h"
 
+/* Debug console (stub si CONFIG_MESHPAY_DEBUG_CONSOLE=n — voir le
+ * header pour la strategie de gating). */
+#include "debug_console/debug_console.h"
+
 static const char *TAG = "main";
 
 /* ================================================================
@@ -495,6 +499,280 @@ static uint32_t main_collect_confirmed_txs(uint64_t        since_ts,
     return written;
 }
 #endif
+
+/* ================================================================
+ * Debug console callbacks (composant debug_console)
+ *
+ * Quatre callbacks de dump JSON pour le moniteur multi-device serie.
+ * Chacun prend s_state_mutex avec un timeout court, itere sur l'etat
+ * partage, emet une ligne JSON par item via le writer fourni, puis
+ * libere le mutex. Conserves uniquement quand CONFIG_MESHPAY_DEBUG_
+ * CONSOLE=y (compile-out complet en production via le header).
+ *
+ * Pattern identique a main_collect_confirmed_txs (Lot C item 7) :
+ * inversion de dependance, le composant ne touche jamais aux types
+ * applicatifs ni au mutex directement.
+ * ================================================================ */
+
+#if CONFIG_MESHPAY_DEBUG_CONSOLE
+
+/* Buffer ligne reutilise par les callbacks de dump. Reside dans le
+ * .bss (static) plutot que sur la stack pour eviter de gonfler les
+ * stacks de la tache dbg_console (4 Ko) pour chaque appel.
+ * Acces concurrent impossible : tous les callbacks sont appeles en
+ * sequence par la meme tache dbg_console. */
+static char s_dbg_line[CONFIG_MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE];
+
+/** Helper : encode un buffer binaire en hex via le helper du composant. */
+static inline void dbg_hex(const uint8_t *src, size_t len, char *dst, size_t dst_size)
+{
+    debug_console_hex_encode(src, len, dst, dst_size);
+}
+
+/** Nom lisible du status TX pour le JSON. */
+static const char *dbg_status_name(tx_status_t s)
+{
+    switch (s) {
+        case TX_STATUS_LOCKED:    return "LOCKED";
+        case TX_STATUS_CONFIRMED: return "CONFIRMED";
+        case TX_STATUS_CANCELLED: return "CANCELLED";
+        default:                  return "?";
+    }
+}
+
+/**
+ * @brief Dump du DAG : count, max, puis une ligne par TX.
+ *
+ * Format d'une ligne TX (JSON sur une seule ligne) :
+ *   {"i":N,"id":"<hex>","type":"TRANSFER|MINT","from":"<hex>",
+ *    "to":"<hex>","amount":N,"currency":N,"fee":N,"seq":N,
+ *    "status":"LOCKED|CONFIRMED|CANCELLED","ts":N,"parents":["<hex>",...]}
+ */
+static void main_debug_dump_dag(debug_console_writer_fn writer, void *ctx)
+{
+    const TickType_t to = pdMS_TO_TICKS(CONFIG_MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS);
+    if (xSemaphoreTake(s_state_mutex, to) != pdTRUE) {
+        writer("{\"err\":\"mutex_timeout\"}", ctx);
+        return;
+    }
+
+    /* Header : compte de TX et capacite max. */
+    snprintf(s_dbg_line, sizeof(s_dbg_line),
+             "{\"count\":%lu,\"max\":%lu}",
+             (unsigned long)s_dag.count,
+             (unsigned long)DAG_MAX_TRANSACTIONS);
+    writer(s_dbg_line, ctx);
+
+    /* Buffers hex locaux (chaque hex = 2*32+1 = 65 octets). */
+    char id_hex[CRYPTO_HASH_SIZE * 2 + 1];
+    char from_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
+    char to_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
+    char parent_hex[CRYPTO_HASH_SIZE * 2 + 1];
+
+    for (uint32_t i = 0; i < s_dag.count; i++) {
+        const transaction_t *tx = &s_dag.transactions[i];
+
+        dbg_hex(tx->id.bytes, sizeof(tx->id.bytes), id_hex, sizeof(id_hex));
+        dbg_hex(tx->from.bytes, sizeof(tx->from.bytes), from_hex, sizeof(from_hex));
+        dbg_hex(tx->to.bytes, sizeof(tx->to.bytes), to_hex, sizeof(to_hex));
+
+        /* Construction de la ligne en deux temps :
+         *   1. partie scalaire jusqu'au '[' des parents,
+         *   2. enumeration des parents (1 ou 2) puis fermeture ']}'. */
+        int n = snprintf(s_dbg_line, sizeof(s_dbg_line),
+                         "{\"i\":%lu,\"id\":\"%s\",\"type\":\"%s\","
+                         "\"from\":\"%s\",\"to\":\"%s\","
+                         "\"amount\":%lu,\"currency\":%lu,\"fee\":%lu,"
+                         "\"seq\":%lu,\"status\":\"%s\","
+                         "\"ts\":%llu,\"parents\":[",
+                         (unsigned long)i,
+                         id_hex,
+                         tx->type == TX_TYPE_MINT ? "MINT" : "TRANSFER",
+                         from_hex, to_hex,
+                         (unsigned long)tx->amount,
+                         (unsigned long)tx->currency_id,
+                         (unsigned long)tx->fee,
+                         (unsigned long)tx->seq,
+                         dbg_status_name(tx->status),
+                         (unsigned long long)tx->timestamp);
+
+        for (uint8_t p = 0; p < tx->parent_count && n > 0 && n < (int)sizeof(s_dbg_line); p++) {
+            dbg_hex(tx->parents[p].bytes, sizeof(tx->parents[p].bytes),
+                    parent_hex, sizeof(parent_hex));
+            n += snprintf(s_dbg_line + n, sizeof(s_dbg_line) - n,
+                          "%s\"%s\"", p > 0 ? "," : "", parent_hex);
+        }
+        if (n > 0 && n < (int)sizeof(s_dbg_line)) {
+            snprintf(s_dbg_line + n, sizeof(s_dbg_line) - n, "]}");
+        }
+        writer(s_dbg_line, ctx);
+    }
+
+    xSemaphoreGive(s_state_mutex);
+}
+
+/**
+ * @brief Dump du wallet : identite, alias, solde, verrous actifs.
+ *
+ * Une premiere ligne avec l'identite, puis une ligne par lock actif :
+ *   {"own":"<hex>","alias":"...","balance":N,"fee_recipient":"<hex>",
+ *    "last_melt_ts":N,"lock_count":N}
+ *   {"i":N,"tx_id":"<hex>","amount":N,"lock_time":N}
+ */
+static void main_debug_dump_wallet(debug_console_writer_fn writer, void *ctx)
+{
+    const TickType_t to = pdMS_TO_TICKS(CONFIG_MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS);
+    if (xSemaphoreTake(s_state_mutex, to) != pdTRUE) {
+        writer("{\"err\":\"mutex_timeout\"}", ctx);
+        return;
+    }
+
+    /* Calcul du solde courant : wallet_get_balance_for traverse
+     * checkpoint + DAG post-checkpoint. Cest la meme fonction
+     * utilisee par l'UI, donc le solde affiche est exactement celui
+     * que le device voit. */
+    uint32_t balance = 0;
+    (void)wallet_get_balance_for(&s_dag, &s_checkpoint,
+                                  &s_keypair.public_key,
+                                  &s_wallet.fee_recipient,
+                                  &balance);
+
+    char own_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
+    char fee_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
+    dbg_hex(s_keypair.public_key.bytes, sizeof(s_keypair.public_key.bytes),
+            own_hex, sizeof(own_hex));
+    dbg_hex(s_wallet.fee_recipient.bytes, sizeof(s_wallet.fee_recipient.bytes),
+            fee_hex, sizeof(fee_hex));
+
+    /* Compter les locks actifs. */
+    uint32_t active_locks = 0;
+    for (uint32_t i = 0; i < WALLET_MAX_LOCKS; i++) {
+        if (s_lock_table.entries[i].active) active_locks++;
+    }
+
+    snprintf(s_dbg_line, sizeof(s_dbg_line),
+             "{\"own\":\"%s\",\"alias\":\"%.*s\","
+             "\"balance\":%lu,\"fee_recipient\":\"%s\","
+             "\"last_melt_ts\":%llu,\"lock_count\":%lu,"
+             "\"max_locks\":%lu}",
+             own_hex,
+             (int)s_device_alias_len, s_device_alias,
+             (unsigned long)balance,
+             fee_hex,
+             (unsigned long long)s_wallet.last_melt_timestamp,
+             (unsigned long)active_locks,
+             (unsigned long)WALLET_MAX_LOCKS);
+    writer(s_dbg_line, ctx);
+
+    /* Une ligne par lock actif. */
+    char lock_hex[CRYPTO_HASH_SIZE * 2 + 1];
+    for (uint32_t i = 0; i < WALLET_MAX_LOCKS; i++) {
+        const lock_entry_t *lk = &s_lock_table.entries[i];
+        if (!lk->active) continue;
+        dbg_hex(lk->tx_id.bytes, sizeof(lk->tx_id.bytes),
+                lock_hex, sizeof(lock_hex));
+        snprintf(s_dbg_line, sizeof(s_dbg_line),
+                 "{\"i\":%lu,\"tx_id\":\"%s\","
+                 "\"amount\":%lu,\"lock_time\":%llu}",
+                 (unsigned long)i, lock_hex,
+                 (unsigned long)lk->amount,
+                 (unsigned long long)lk->lock_time);
+        writer(s_dbg_line, ctx);
+    }
+
+    xSemaphoreGive(s_state_mutex);
+}
+
+/**
+ * @brief Dump de la config monnaie : nom, symbole, parametres, autorites.
+ *
+ *   {"id":N,"name":"...","symbol":"...","decimals":N,
+ *    "max_supply":N,"valid_until":N,"initial_balance":N,
+ *    "transfer_fee":N,"melt_enabled":bool,"melt_period":N,
+ *    "melt_mode":"BPS|FIXED","melt_bps":N,"melt_fixed":N,
+ *    "mint_authority_count":N}
+ *   {"i":N,"pubkey":"<hex>"}   (une ligne par mint_authority)
+ */
+static void main_debug_dump_currency(debug_console_writer_fn writer, void *ctx)
+{
+    const TickType_t to = pdMS_TO_TICKS(CONFIG_MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS);
+    if (xSemaphoreTake(s_state_mutex, to) != pdTRUE) {
+        writer("{\"err\":\"mutex_timeout\"}", ctx);
+        return;
+    }
+
+    snprintf(s_dbg_line, sizeof(s_dbg_line),
+             "{\"id\":%lu,\"name\":\"%s\",\"symbol\":\"%s\","
+             "\"decimals\":%u,\"max_supply\":%llu,"
+             "\"valid_until\":%llu,\"initial_balance\":%lu,"
+             "\"transfer_fee\":%lu,"
+             "\"melt_enabled\":%s,\"melt_period\":%lu,"
+             "\"melt_mode\":\"%s\",\"melt_bps\":%u,"
+             "\"melt_fixed\":%lu,\"mint_authority_count\":%u}",
+             (unsigned long)s_currency.currency_id,
+             s_currency.name, s_currency.symbol,
+             (unsigned)s_currency.decimals,
+             (unsigned long long)s_currency.max_supply,
+             (unsigned long long)s_currency.valid_until,
+             (unsigned long)s_currency.initial_balance,
+             (unsigned long)s_currency.transfer_fee,
+             s_currency.melt_enabled ? "true" : "false",
+             (unsigned long)s_currency.melt_period_seconds,
+             s_currency.melt_volume_mode == MELT_MODE_BPS ? "BPS" : "FIXED",
+             (unsigned)s_currency.melt_bps,
+             (unsigned long)s_currency.melt_fixed_amount,
+             (unsigned)s_currency.mint_authority_count);
+    writer(s_dbg_line, ctx);
+
+    char auth_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
+    for (uint8_t i = 0; i < s_currency.mint_authority_count; i++) {
+        dbg_hex(s_currency.mint_authorities[i].bytes,
+                sizeof(s_currency.mint_authorities[i].bytes),
+                auth_hex, sizeof(auth_hex));
+        snprintf(s_dbg_line, sizeof(s_dbg_line),
+                 "{\"i\":%u,\"pubkey\":\"%s\"}", (unsigned)i, auth_hex);
+        writer(s_dbg_line, ctx);
+    }
+
+    xSemaphoreGive(s_state_mutex);
+}
+
+/**
+ * @brief Dump du time_manager : mode, Lamport, etat maitre.
+ *
+ *   {"mode":"LAMPORT|MASTER","lamport":N,"master_valid":bool,
+ *    "master_offset_ms":N,"last_master_update":N,
+ *    "master_key":"<hex>"}
+ */
+static void main_debug_dump_time(debug_console_writer_fn writer, void *ctx)
+{
+    const TickType_t to = pdMS_TO_TICKS(CONFIG_MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS);
+    if (xSemaphoreTake(s_state_mutex, to) != pdTRUE) {
+        writer("{\"err\":\"mutex_timeout\"}", ctx);
+        return;
+    }
+
+    char master_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
+    dbg_hex(s_time_manager.current_master_key.bytes,
+            sizeof(s_time_manager.current_master_key.bytes),
+            master_hex, sizeof(master_hex));
+
+    snprintf(s_dbg_line, sizeof(s_dbg_line),
+             "{\"mode\":\"%s\",\"lamport\":%llu,"
+             "\"master_valid\":%s,\"master_offset_ms\":%lld,"
+             "\"last_master_update\":%llu,\"master_key\":\"%s\"}",
+             s_time_manager.mode == TIME_MODE_MASTER ? "MASTER" : "LAMPORT",
+             (unsigned long long)time_manager_get_lamport(&s_time_manager),
+             s_time_manager.master_valid ? "true" : "false",
+             (long long)s_time_manager.master_offset_ms,
+             (unsigned long long)s_time_manager.last_master_update,
+             master_hex);
+    writer(s_dbg_line, ctx);
+
+    xSemaphoreGive(s_state_mutex);
+}
+
+#endif /* CONFIG_MESHPAY_DEBUG_CONSOLE */
 
 /* ================================================================
  * Stack monitoring [Lot C item 8]
@@ -3103,6 +3381,29 @@ void app_main(void)
     /* Tache core — commune aux deux targets */
     xTaskCreate(core_task, "core", CORE_TASK_STACK, NULL,
                 CORE_TASK_PRIO, NULL);
+
+    /* ---- Console de debug serie (composant debug_console) ----
+     * Active quand CONFIG_MESHPAY_DEBUG_CONSOLE=y (= mode prototype,
+     * voir Kconfig du composant pour la regle de default basee sur
+     * SECURE_FLASH_ENCRYPTION_MODE_RELEASE). Quand desactivee, l'appel
+     * se replie sur un stub static inline (zero code embarque). */
+#if CONFIG_MESHPAY_DEBUG_CONSOLE
+    static const debug_console_callbacks_t s_debug_cbs = {
+        .dump_dag      = main_debug_dump_dag,
+        .dump_wallet   = main_debug_dump_wallet,
+        .dump_currency = main_debug_dump_currency,
+        .dump_time     = main_debug_dump_time,
+    };
+    esp_err_t dbg_err = debug_console_init(&s_debug_cbs);
+    if (dbg_err != ESP_OK) {
+        ESP_LOGW(TAG, "Console de debug : init echouee (err=0x%x)",
+                 (int)dbg_err);
+    } else {
+        ESP_LOGI(TAG, "Console de debug active (commandes : help, "
+                      "dump_dag, dump_wallet, dump_currency, "
+                      "dump_time, dump_all).");
+    }
+#endif
 
     /* ---- 13. UI task ---- */
     s_ui_cmd_queue = xQueueCreate(UI_CMD_QUEUE_DEPTH, sizeof(ui_cmd_t));

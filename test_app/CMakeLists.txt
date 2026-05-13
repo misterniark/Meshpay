@@ -32,6 +32,7 @@ set(EXTRA_COMPONENT_DIRS
     "../components/time_manager"
     "../components/currency"
     "../components/ui"
+    "../components/debug_console"
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

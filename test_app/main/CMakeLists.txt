@@ -18,4 +18,5 @@ idf_component_register(
              lora_sync
              device_hal
              ui
+             debug_console
 )

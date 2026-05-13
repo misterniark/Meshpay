@@ -52,3 +52,9 @@ auditusagechatgtp.md
 
 # --- Claude ---------------------------------------------------------------
 .claude/
+
+# --- Outillage Python (tools/) --------------------------------------------
+# Caches d'execution generes par Python lors des tests unitaires.
+__pycache__/
+*.pyc
+*.pyo

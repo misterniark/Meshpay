@@ -1,0 +1,70 @@
+# Kconfig du composant debug_console (Mesh Pay)
+#
+# Console serie de debug qui expose des commandes de dump JSON
+# (dump_dag, dump_wallet, dump_currency, dump_time) consommables
+# par un moniteur externe Python pour observer la convergence DAG
+# et la propagation LoRa entre devices pendant les tests terrain.
+#
+# Gate sur SECURE_FLASH_ENCRYPTION_MODE_RELEASE : tant qu'on est en
+# mode DEVELOPMENT (prototype), le debug est actif par defaut. Des que
+# le mode RELEASE est selectionne (production), il est desactive
+# automatiquement — le code entier est strippe par le linker (zero
+# octet flash, zero octet RAM, zero surface d'attaque).
+
+menu "Mesh Pay debug console"
+
+    config MESHPAY_DEBUG_CONSOLE
+        bool "Enable serial debug console (dump_dag, dump_wallet, ...)"
+        default y if !SECURE_FLASH_ENCRYPTION_MODE_RELEASE
+        default n
+        help
+            Active la console serie de debug. Commandes disponibles :
+            dump_dag, dump_wallet, dump_currency, dump_time, dump_all,
+            help. La sortie est encadree par des marqueurs textuels
+            (<<<MESHPAY_DEBUG ... BEGIN/END>>>) pour etre distinguable
+            des ESP_LOGI qui coulent en parallele sur la meme UART.
+
+            A laisser desactive en production : la commande dump_*
+            expose le contenu du DAG (historique des transactions,
+            cles publiques des pairs) en clair sur le port serie.
+
+    config MESHPAY_DEBUG_CONSOLE_TASK_STACK
+        int "Stack size of debug console task (bytes)"
+        depends on MESHPAY_DEBUG_CONSOLE
+        default 4096
+        help
+            Taille de pile pour la tache qui lit les commandes UART et
+            execute les callbacks de dump. 4096 octets suffisent pour
+            une iteration sur 250 TX avec serialisation JSON ligne par
+            ligne (le buffer ligne lui-meme reste sur la stack).
+
+    config MESHPAY_DEBUG_CONSOLE_TASK_PRIO
+        int "Priority of debug console task"
+        depends on MESHPAY_DEBUG_CONSOLE
+        default 2
+        help
+            Priorite basse : la console de debug ne doit jamais
+            preempter les taches metier (core_task=6, espnow_task=7,
+            lora_task=5, ui_task=4). Au-dessus de stkmon (1) pour
+            que les commandes restent reactives.
+
+    config MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE
+        int "Max length of a debug input/output line (bytes)"
+        depends on MESHPAY_DEBUG_CONSOLE
+        default 384
+        help
+            Taille du buffer ligne utilise pour parser une commande
+            entrante et pour formater une ligne JSON sortante. 384
+            couvre la plus grosse ligne TX serialisee (id + from + to
+             + parents en hex = ~300 caracteres).
+
+    config MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS
+        int "Mutex acquisition timeout in dumps (ms)"
+        depends on MESHPAY_DEBUG_CONSOLE
+        default 1000
+        help
+            Delai max d'attente du mutex applicatif pour une commande
+            de dump. Si depasse, le dump est avorte avec une trame
+            d'erreur — pas de blocage durable.
+
+endmenu

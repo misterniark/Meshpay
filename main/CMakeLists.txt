@@ -16,5 +16,6 @@ idf_component_register(
              currency time_manager device_hal
              nvs_flash esp_timer esp_wifi
              ui
+             debug_console
     PRIV_REQUIRES nvs_sec_provider esp_partition
 )
