@@ -115,3 +115,10 @@ TickType_t s_pong_start_tick = 0;
 public_key_t s_beneficiary_key;          /* Initialise a zero par defaut */
 uint16_t     s_forward_interval_min = 0; /* 0 = inactif */
 uint64_t     s_last_forward_ms = 0;
+
+/* ================================================================
+ * Callbacks de persistance checkpoint (init dans app_main)
+ * ================================================================ */
+
+checkpoint_save_fn s_checkpoint_save = NULL;
+checkpoint_load_fn s_checkpoint_load = NULL;

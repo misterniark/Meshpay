@@ -254,10 +254,15 @@ extern uint16_t     s_forward_interval_min;
 extern uint64_t     s_last_forward_ms;
 
 /*
- * Note : les callbacks de persistance checkpoint (s_checkpoint_save /
- * s_checkpoint_load) restent dans main.c au Lot 1 car ils referencent
- * des fonctions statiques (nvs_checkpoint_save/load) qui migreront vers
- * components/main/persistence/nvs_checkpoint.c au Lot 2.
+ * Callbacks de persistance checkpoint (Lot 2).
+ *
+ * En production : initialises avec nvs_checkpoint_save / nvs_checkpoint_load
+ * (composant main/persistence). En test, peuvent etre reassignes avant le
+ * boot pour brancher un backend memoire/SD/SPIFFS.
+ *
+ * L'initialisation se fait dans app_main (cf. seance 3c).
  */
+extern checkpoint_save_fn s_checkpoint_save;
+extern checkpoint_load_fn s_checkpoint_load;
 
 #endif /* MESHPAY_APP_STATE_H */

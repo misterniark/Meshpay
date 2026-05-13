@@ -17,6 +17,12 @@ idf_component_register(
         "stack_monitor.c"
         "peers.c"
         "currency_config_init.c"
+        # Persistance NVS (Lot D.2)
+        "persistence/nvs_keypair.c"
+        "persistence/nvs_checkpoint.c"
+        "persistence/nvs_alias.c"
+        "persistence/nvs_next_seq.c"
+        "persistence/nvs_beneficiary.c"
     INCLUDE_DIRS "."
     REQUIRES wallet dag transaction crypto
              comm_protocol espnow lora_sync

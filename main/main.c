@@ -386,334 +386,21 @@ static void main_debug_dump_time(debug_console_writer_fn writer, void *ctx)
 
 /* Stack monitoring deplace dans stack_monitor.{h,c} au Lot D. */
 
-/* ================================================================
- * Persistance NVS
- * ================================================================ */
-
-/**
- * @brief Charge ou genere le keypair du device.
+/* Persistance NVS deplacee dans main/persistence/ au Lot D.2 :
+ *   - nvs_keypair    : load_or_generate_keypair
+ *   - nvs_checkpoint : nvs_checkpoint_load / nvs_checkpoint_save
+ *   - nvs_alias      : load_or_generate_alias + generate_random_alias
+ *   - nvs_next_seq   : next_seq + load_next_seq_or_recompute
+ *   - nvs_beneficiary: load beneficiaire au boot
  *
- * Au premier demarrage, genere un keypair Ed25519 et le sauvegarde
- * dans NVS. Aux demarrages suivants, le charge depuis NVS.
- *
- * @return ESP_OK en cas de succes
+ * Les pointeurs s_checkpoint_save / s_checkpoint_load sont desormais
+ * declares dans app_state.h et initialises en app_main.
  */
-static esp_err_t load_or_generate_keypair(void)
-{
-    size_t len = sizeof(s_keypair.private_key);
-    bool key_exists = false;
-
-    /* Verifier si une cle existe dans le NVS */
-    hal_err_t err = s_storage.exists(NVS_NAMESPACE, NVS_KEY_PRIVKEY,
-                                     &key_exists, s_storage.ctx);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "Erreur verification cle NVS: %d", err);
-        return ESP_FAIL;
-    }
-
-    if (key_exists) {
-        /* Charger la cle privee */
-        err = s_storage.blob_read(NVS_NAMESPACE, NVS_KEY_PRIVKEY,
-                                  s_keypair.private_key, &len, s_storage.ctx);
-        if (err != HAL_OK) {
-            ESP_LOGE(TAG, "Erreur lecture cle privee NVS: %d", err);
-            return ESP_FAIL;
-        }
-
-        /* Charger la cle publique */
-        len = sizeof(s_keypair.public_key);
-        err = s_storage.blob_read(NVS_NAMESPACE, NVS_KEY_PUBKEY,
-                                  s_keypair.public_key.bytes, &len, s_storage.ctx);
-        if (err != HAL_OK) {
-            ESP_LOGE(TAG, "Erreur lecture cle publique NVS: %d", err);
-            return ESP_FAIL;
-        }
-
-        ESP_LOGI(TAG, "Keypair charge depuis NVS");
-    } else {
-        /* Premier demarrage : generer un nouveau keypair */
-        esp_err_t ret = crypto_generate_keypair(&s_keypair);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Erreur generation keypair: %d", ret);
-            return ret;
-        }
-
-        /* Sauvegarder dans NVS */
-        err = s_storage.blob_write(NVS_NAMESPACE, NVS_KEY_PRIVKEY,
-                                   s_keypair.private_key,
-                                   sizeof(s_keypair.private_key), s_storage.ctx);
-        if (err != HAL_OK) {
-            ESP_LOGE(TAG, "Erreur ecriture cle privee NVS: %d", err);
-            return ESP_FAIL;
-        }
-
-        err = s_storage.blob_write(NVS_NAMESPACE, NVS_KEY_PUBKEY,
-                                   s_keypair.public_key.bytes,
-                                   sizeof(s_keypair.public_key), s_storage.ctx);
-        if (err != HAL_OK) {
-            ESP_LOGE(TAG, "Erreur ecriture cle publique NVS: %d", err);
-            return ESP_FAIL;
-        }
-
-        ESP_LOGI(TAG, "Nouveau keypair genere et sauvegarde");
-    }
-
-    return ESP_OK;
-}
-
-/**
- * @brief Charge un checkpoint depuis NVS (implemente checkpoint_load_fn).
- *
- * Lit le blob NVS et le copie dans le checkpoint fourni.
- * Gere la migration d'ancien format (avant ajout de last_melt_timestamp).
- *
- * @param checkpoint Checkpoint a remplir
- * @param ctx        Non utilise (le storage est global)
- * @return ESP_OK si charge, ESP_ERR_NOT_FOUND si aucun checkpoint
- */
-static esp_err_t nvs_checkpoint_load(checkpoint_t *checkpoint, void *ctx)
-{
-    (void)ctx;
-    size_t len = sizeof(checkpoint_t);
-    bool exists = false;
-
-    hal_err_t err = s_storage.exists(NVS_NAMESPACE, NVS_KEY_CHECKPOINT,
-                                     &exists, s_storage.ctx);
-    if (err != HAL_OK || !exists) {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    size_t stored_len = len;
-    err = s_storage.blob_read(NVS_NAMESPACE, NVS_KEY_CHECKPOINT,
-                              (uint8_t *)checkpoint, &stored_len, s_storage.ctx);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "Erreur lecture checkpoint NVS: %d", err);
-        return ESP_FAIL;
-    }
-
-    /*
-     * Migration : si le checkpoint NVS est d'un ancien format (avant ajout
-     * de last_melt_timestamp dans checkpoint_entry_t), les champs
-     * last_melt_timestamp contiennent des donnees aleatoires.
-     * On les reinitialise a 0 pour que la fonte demarre proprement.
-     */
-    if (stored_len < sizeof(checkpoint_t)) {
-        ESP_LOGW(TAG, "Checkpoint ancien format (%zu < %zu), "
-                 "last_melt_timestamp remis a 0",
-                 stored_len, sizeof(checkpoint_t));
-        checkpoint->last_melt_timestamp = 0;
-    }
-
-    ESP_LOGI(TAG, "Checkpoint charge (%"PRIu32" comptes)", checkpoint->account_count);
-    return ESP_OK;
-}
-
-/**
- * @brief Sauvegarde un checkpoint dans NVS (implemente checkpoint_save_fn).
- *
- * @param checkpoint Checkpoint a sauvegarder
- * @param ctx        Non utilise (le storage est global)
- */
-static esp_err_t nvs_checkpoint_save(const checkpoint_t *checkpoint, void *ctx)
-{
-    (void)ctx;
-    hal_err_t err = s_storage.blob_write(NVS_NAMESPACE, NVS_KEY_CHECKPOINT,
-                                         (const uint8_t *)checkpoint,
-                                         sizeof(checkpoint_t), s_storage.ctx);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "Erreur ecriture checkpoint NVS: %d", err);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Checkpoint sauvegarde (%"PRIu32" comptes)", checkpoint->account_count);
-    return ESP_OK;
-}
-
-/**
- * Callbacks de persistance checkpoint (injectables).
- *
- * En production : NVS. En test : memoire.
- * Pour changer le backend de stockage, il suffit de remplacer
- * ces pointeurs avant le boot (ex: stockage SPIFFS, SD card…).
- */
-static checkpoint_save_fn s_checkpoint_save = nvs_checkpoint_save;
-static checkpoint_load_fn s_checkpoint_load = nvs_checkpoint_load;
-
-/* ================================================================
- * Alias du device (persistance NVS)
- * ================================================================ */
-
-/**
- * Listes de mots pour generer un alias lisible aleatoire.
- *
- * Format : "<Adjectif>-<Animal>" (ex: "Brave-Loup", "Vif-Renard").
- * L'entropie est ~8 bits (16 * 16 = 256 combinaisons), suffisante
- * pour distinguer les devices dans un reseau local.
- */
-static const char *s_adjectives[] = {
-    "Brave", "Vif", "Grand", "Petit", "Doux", "Fort", "Sage", "Fier",
-    "Agile", "Calme", "Noble", "Leger", "Rusee", "Clair", "Libre", "Rapide"
-};
-#define NUM_ADJECTIVES 16
-
-static const char *s_animals[] = {
-    "Loup", "Renard", "Cerf", "Aigle", "Lynx", "Ours", "Hibou", "Faucon",
-    "Herisson", "Loutre", "Belette", "Merle", "Cigale", "Castor", "Lievre", "Cygne"
-};
-#define NUM_ANIMALS 16
-
-/**
- * @brief Genere un alias lisible aleatoire a partir de la cle publique.
- *
- * Utilise les deux derniers octets de la pubkey comme source d'entropie
- * pour selectionner un adjectif et un animal. Le resultat est deterministe
- * pour une meme pubkey (reproductible).
- *
- * @param pubkey   Cle publique du device (source d'entropie)
- * @param out_buf  Buffer de sortie (min COMM_MSG_ALIAS_MAX + 1)
- * @param out_len  [out] Longueur de l'alias genere
- */
-static void generate_random_alias(const public_key_t *pubkey,
-                                  char *out_buf, uint8_t *out_len)
-{
-    /* Utiliser les 2 derniers octets de la pubkey comme index */
-    uint8_t adj_idx = pubkey->bytes[CRYPTO_PUBLIC_KEY_SIZE - 2] % NUM_ADJECTIVES;
-    uint8_t ani_idx = pubkey->bytes[CRYPTO_PUBLIC_KEY_SIZE - 1] % NUM_ANIMALS;
-
-    int len = snprintf(out_buf, COMM_MSG_ALIAS_MAX + 1, "%s-%s",
-                       s_adjectives[adj_idx], s_animals[ani_idx]);
-    if (len < 0) len = 0;
-    if (len > COMM_MSG_ALIAS_MAX) len = COMM_MSG_ALIAS_MAX;
-    *out_len = (uint8_t)len;
-}
-
-/**
- * @brief Charge l'alias depuis NVS, ou en genere un au premier boot.
- *
- * Au premier boot, genere un alias lisible a partir de la pubkey
- * et le sauvegarde dans NVS. Aux boots suivants, charge depuis NVS.
- *
- * @return ESP_OK en cas de succes
- */
-static esp_err_t load_or_generate_alias(void)
-{
-    bool exists = false;
-    hal_err_t err = s_storage.exists(NVS_NAMESPACE, NVS_KEY_ALIAS,
-                                     &exists, s_storage.ctx);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "Erreur verification alias NVS: %d", err);
-        return ESP_FAIL;
-    }
-
-    if (exists) {
-        /* Charger l'alias depuis NVS */
-        size_t len = COMM_MSG_ALIAS_MAX;
-        err = s_storage.blob_read(NVS_NAMESPACE, NVS_KEY_ALIAS,
-                                  (uint8_t *)s_device_alias, &len, s_storage.ctx);
-        if (err != HAL_OK) {
-            ESP_LOGE(TAG, "Erreur lecture alias NVS: %d", err);
-            return ESP_FAIL;
-        }
-        /* Securite [M13] : borner la longueur lue pour eviter un
-         * debordement si la valeur NVS est corrompue ou manipulee */
-        if (len > COMM_MSG_ALIAS_MAX) len = COMM_MSG_ALIAS_MAX;
-        s_device_alias[len] = '\0';
-        s_device_alias_len = (uint8_t)len;
-
-        ESP_LOGI(TAG, "Alias charge depuis NVS: \"%s\"", s_device_alias);
-    } else {
-        /* Premier boot : generer un alias a partir de la pubkey */
-        generate_random_alias(&s_keypair.public_key,
-                              s_device_alias, &s_device_alias_len);
-
-        /* Sauvegarder dans NVS */
-        err = s_storage.blob_write(NVS_NAMESPACE, NVS_KEY_ALIAS,
-                                   (const uint8_t *)s_device_alias,
-                                   s_device_alias_len, s_storage.ctx);
-        if (err != HAL_OK) {
-            ESP_LOGE(TAG, "Erreur ecriture alias NVS: %d", err);
-            return ESP_FAIL;
-        }
-
-        ESP_LOGI(TAG, "Alias genere et sauvegarde: \"%s\"", s_device_alias);
-    }
-
-    return ESP_OK;
-}
-
-/* init_currency_config deplace dans currency_config_init.{h,c} au Lot D.
- * add_peer / find_peer_mac deplaces dans peers.{h,c} au Lot D. */
-
-/* ================================================================
- * Nonce monotone par emetteur (I3)
- * ================================================================ */
-
-/**
- * @brief [I3-fix] Retourne le prochain seq a utiliser pour une TX sortante
- *        et persiste la valeur incrementee en NVS.
- *
- * Strategie : on persiste AVANT d'utiliser la valeur, pour qu'en cas de
- * crash apres ecriture NVS mais avant emission de la TX, le seq soit
- * simplement "perdu" (saute un numero). Mieux vaut un trou dans la
- * sequence qu'un conflit de seq reutilise apres reboot.
- *
- * Appelee sous s_state_mutex.
- */
-static uint32_t next_seq(void)
-{
-    uint32_t seq = s_next_seq;
-
-    /*
-     * Incrementer d'abord et ecrire en NVS. Si l'ecriture echoue, on
-     * prefere continuer avec une valeur non persistee plutot que de
-     * bloquer l'emission — la persistance est une protection contre
-     * les reboots, pas une garantie crypto.
-     */
-    s_next_seq++;
-    hal_err_t herr = s_storage.u32_write(NVS_NAMESPACE, NVS_KEY_NEXT_SEQ,
-                                         s_next_seq, s_storage.ctx);
-    if (herr != HAL_OK) {
-        ESP_LOGW(TAG, "next_seq: echec persistance NVS (%d)", herr);
-    }
-
-    return seq;
-}
-
-/**
- * @brief Charge s_next_seq depuis NVS (appele au boot).
- *
- * En cas d'absence du compteur (premier boot ou NVS vierge), on
- * calcule une borne inferieure sure en balayant le DAG+checkpoint :
- * s_next_seq = 1 + max(seq des TX ou from == owner). Cela garantit
- * qu'on ne reutilisera jamais un seq deja vu par le reseau, meme apres
- * un reset du NVS.
- */
-static void load_next_seq_or_recompute(void)
-{
-    uint32_t persisted = 0;
-    hal_err_t herr = s_storage.u32_read(NVS_NAMESPACE, NVS_KEY_NEXT_SEQ,
-                                        &persisted, s_storage.ctx);
-    if (herr == HAL_OK) {
-        s_next_seq = persisted;
-        ESP_LOGI(TAG, "next_seq charge depuis NVS: %"PRIu32, s_next_seq);
-        return;
-    }
-
-    /*
-     * Reconstruire a partir de l'etat local (checkpoint + DAG).
-     * On cherche le max des seq observes pour notre propre pubkey.
-     */
-    uint32_t max_seq = 0;
-    for (uint32_t i = 0; i < s_dag.count; i++) {
-        const transaction_t *tx = &s_dag.transactions[i];
-        if (public_key_equal(&tx->from, &s_keypair.public_key) &&
-            tx->seq > max_seq) {
-            max_seq = tx->seq;
-        }
-    }
-    s_next_seq = (max_seq == 0) ? 0 : (max_seq + 1);
-    ESP_LOGI(TAG, "next_seq recompute depuis DAG: %"PRIu32, s_next_seq);
-}
+#include "persistence/nvs_keypair.h"
+#include "persistence/nvs_checkpoint.h"
+#include "persistence/nvs_alias.h"
+#include "persistence/nvs_next_seq.h"
+#include "persistence/nvs_beneficiary.h"
 
 /* ================================================================
  * Calcul de solde coherent checkpoint + DAG
@@ -2657,7 +2344,7 @@ void app_main(void)
     ESP_LOGI(TAG, "[2bis/12] Sous-systeme crypto initialise (Monocypher Ed25519)");
 
     /* ---- 3. Keypair ---- */
-    ret = load_or_generate_keypair();
+    ret = nvs_keypair_load_or_generate();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Keypair init echoue");
         return;
@@ -2665,33 +2352,18 @@ void app_main(void)
     ESP_LOGI(TAG, "[3/12] Keypair pret");
 
     /* ---- 3b. Alias du device ---- */
-    ret = load_or_generate_alias();
+    ret = nvs_alias_load_or_generate();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Alias init echoue, utilisation du defaut");
     }
 
     /* ---- 3c. Configuration beneficiaire (auto-forward) ---- */
-    {
-        bool exists = false;
-        hal_err_t herr = s_storage.exists(NVS_NAMESPACE, NVS_KEY_BENEFICIARY,
-                                          &exists, s_storage.ctx);
-        if (herr == HAL_OK && exists) {
-            size_t key_len = sizeof(public_key_t);
-            herr = s_storage.blob_read(NVS_NAMESPACE, NVS_KEY_BENEFICIARY,
-                                       s_beneficiary_key.bytes, &key_len,
-                                       s_storage.ctx);
-            if (herr == HAL_OK && key_len == CRYPTO_PUBLIC_KEY_SIZE) {
-                uint32_t interval = 0;
-                herr = s_storage.u32_read(NVS_NAMESPACE, NVS_KEY_FWD_INTERVAL,
-                                          &interval, s_storage.ctx);
-                if (herr == HAL_OK && interval > 0) {
-                    s_forward_interval_min = (uint16_t)interval;
-                    ESP_LOGI(TAG, "Auto-forward charge: interval=%u min",
-                             s_forward_interval_min);
-                }
-            }
-        }
-    }
+    nvs_beneficiary_load();
+
+    /* Init des callbacks de persistance checkpoint (backend NVS).
+     * Pour un backend mock (test), reassigner avant l'appel au load. */
+    s_checkpoint_save = nvs_checkpoint_save;
+    s_checkpoint_load = nvs_checkpoint_load;
 
     /* ---- 4. DAG ---- */
     dag_init(&s_dag);
