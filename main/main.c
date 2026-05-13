@@ -30,11 +30,12 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 
-/* Chiffrement NVS : inclus conditionnellement selon la config */
-#if defined(CONFIG_NVS_ENCRYPTION)
-#include "nvs_sec_provider.h"
-#include "esp_partition.h"
-#endif
+/*
+ * Init NVS : la complexite du chiffrement (CONFIG_NVS_ENCRYPTION) est
+ * isolee dans app_init/nvs_init_{secure,plain}.c (Lot D.8). main.c
+ * appelle nvs_init_storage() sans aucun `#if`.
+ */
+#include "app_init/nvs_init.h"
 
 /*
  * Etat global et capabilites (MP_HAS_ESPNOW / MP_HAS_LORA) :
@@ -147,96 +148,15 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "=== Offline Payment System - Demarrage ===");
 
-    /* ---- 1. NVS (avec chiffrement si CONFIG_NVS_ENCRYPTION) ---- */
+    /* ---- 1. NVS (chiffre ou clair selon CONFIG_NVS_ENCRYPTION) ---- */
     esp_err_t ret;
-
-#if defined(CONFIG_NVS_ENCRYPTION)
-    /*
-     * Initialisation NVS securisee :
-     * 1. Trouver la partition nvs_keys (contient les cles de chiffrement)
-     * 2. Obtenir la configuration de chiffrement via le provider
-     * 3. Initialiser NVS avec chiffrement AES-XTS
-     *
-     * Si la partition nvs_keys est vierge (premier boot), les cles sont
-     * generees automatiquement et stockees dans la partition (elle-meme
-     * protegee par le chiffrement flash materiel).
-     */
-    ESP_LOGI(TAG, "NVS: initialisation avec chiffrement active");
-
-    /* Trouver la partition nvs_keys */
-    const esp_partition_t *keys_part = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS_KEYS, NULL);
-
-    if (keys_part == NULL) {
-        ESP_LOGE(TAG, "Partition nvs_keys introuvable — chiffrement NVS impossible");
-        ESP_LOGE(TAG, "Verifiez que partitions.csv contient une partition nvs_keys");
-        return;
-    }
-
-    /* Obtenir la config de chiffrement via le provider flash-encryption */
-    nvs_sec_cfg_t nvs_sec_cfg;
-    nvs_sec_scheme_t *sec_scheme = NULL;
-    nvs_sec_config_flash_enc_t fe_cfg = NVS_SEC_PROVIDER_CFG_FLASH_ENC_DEFAULT();
-    ret = nvs_sec_provider_register_flash_enc(&fe_cfg, &sec_scheme);
+    bool nvs_encrypted = false;
+    ret = nvs_init_storage(&nvs_encrypted);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Echec enregistrement du scheme NVS sec: 0x%x", ret);
         return;
     }
-
-    ret = nvs_flash_read_security_cfg_v2(sec_scheme, &nvs_sec_cfg);
-    if (ret == ESP_ERR_NVS_KEYS_NOT_INITIALIZED) {
-        /* Premier boot : generer les cles de chiffrement NVS */
-        ESP_LOGW(TAG, "NVS: premier boot, generation des cles de chiffrement");
-        ret = nvs_flash_generate_keys_v2(sec_scheme, &nvs_sec_cfg);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Echec generation cles NVS: 0x%x", ret);
-            return;
-        }
-    } else if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Echec lecture config securite NVS: 0x%x", ret);
-        return;
-    }
-
-    /* Initialisation NVS securisee */
-    ret = nvs_flash_secure_init(&nvs_sec_cfg);
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS: effacement et reinitialisation securisee");
-        nvs_flash_erase();
-        ret = nvs_flash_secure_init(&nvs_sec_cfg);
-#else
-    /* Initialisation NVS standard (sans chiffrement) */
-    ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS: effacement et reinitialisation");
-        nvs_flash_erase();
-        ret = nvs_flash_init();
-#endif /* CONFIG_NVS_ENCRYPTION */
-
-        /* Securite [C11] : apres effacement NVS, initialiser le compteur
-         * d'echecs PIN a la valeur de verrouillage maximale. Cela empeche
-         * un attaquant de contourner le brute-force en effacant le NVS
-         * (qui remettrait normalement le compteur a zero). Le device
-         * sera verrouille et necessitera un factory reset intentionnel. */
-        if (ret == ESP_OK) {
-            nvs_handle_t h;
-            if (nvs_open("pin", NVS_READWRITE, &h) == ESP_OK) {
-                uint32_t max_fails = 10;  /* Valeur de verrouillage */
-                nvs_set_u32(h, "pin_fails", max_fails);
-                nvs_commit(h);
-                nvs_close(h);
-                ESP_LOGW(TAG, "NVS efface : compteur PIN verrouille (anti brute-force)");
-            }
-        }
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "NVS init echoue: 0x%x", ret);
-        return;
-    }
-#if defined(CONFIG_NVS_ENCRYPTION)
-    ESP_LOGI(TAG, "[1/12] NVS initialise (chiffre)");
-#else
-    ESP_LOGI(TAG, "[1/12] NVS initialise");
-#endif
+    ESP_LOGI(TAG, "[1/12] NVS initialise%s",
+             nvs_encrypted ? " (chiffre)" : "");
 
     /* ---- 2. Storage HAL ---- */
     if (hal_storage_esp32_create(&s_storage) != HAL_OK) {
