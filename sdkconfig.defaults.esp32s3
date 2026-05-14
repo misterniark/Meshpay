@@ -2,6 +2,12 @@
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
+# --- Console serie sur USB-Serial-JTAG (USB-C natif, GPIO 19/20) ---
+# Obligatoire : libere UART0 / GPIO 43-44, utilises pour cabler le
+# module LoRa Wio-E5. Sans ce reglage, la console defaulterait sur
+# UART0 et entrerait en conflit direct avec le Wio-E5.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
 # --- PSRAM (8MB octal SPI) ---
 CONFIG_ESP32S3_SPIRAM_SUPPORT=y
 CONFIG_SPIRAM_MODE_OCT=y

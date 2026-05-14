@@ -6,9 +6,9 @@
  * Chaque op verifie `is_master` (device dans `s_currency.mint_authorities`)
  * et retourne `ESP_ERR_NOT_ALLOWED` sur non-maitre.
  *
- * Sur cibles sans LoRa (ESP32-S3), `transport_lora_send` est no-op : le
- * maitre ne peut pas emettre en LoRa, ce qui est le comportement attendu
- * (pas de Wio-E5 onboard).
+ * Le LoRa est obligatoire sur toutes les cibles : `transport_lora_send`
+ * est toujours l'impl reelle. Un non-maitre est filtre par le runtime
+ * check `is_master`, pas par l'absence de radio.
  *
  * Compilent partout — pas de garde `#if CONFIG_IDF_TARGET_ESP32`.
  */

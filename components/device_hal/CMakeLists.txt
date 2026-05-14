@@ -1,8 +1,9 @@
 # CMakeLists.txt du composant HAL
 # Couche d'abstraction matérielle : interfaces portables + implémentations par target
 #
-# ESP32  (CYD)       : ILI9341 display, Wio-E5 LoRa, NVS storage
-# ESP32-S3 (Waveshare) : JD9853 display, NVS storage (client-only, pas de LoRa)
+# ESP32  (CYD)         : ILI9341 display, NVS storage
+# ESP32-S3 (Waveshare) : JD9853 display, NVS storage
+# LoRa : sur toutes les cibles, driver choisi par CONFIG_MESHPAY_LORA_DRIVER.
 
 # hal_power_stub.c est compilé pour TOUTES les cibles : c'est l'impl
 # de production de hal_power tant que le hardware de détection batterie

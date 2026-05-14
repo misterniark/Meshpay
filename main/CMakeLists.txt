@@ -2,11 +2,11 @@
 # Orchestration du système de paiement décentralisé offline
 #
 # ESP32  (CYD)       : core_task + espnow_task + lora_task (noeud complet)
-# ESP32-S3 (Waveshare) : core_task + espnow_task (pas de LoRa onboard)
+# ESP32-S3 (Waveshare) : core_task + espnow_task + lora_task (noeud complet,
+#                        Wio-E5 cable sur UART1 / GPIO 43-44)
 #
 # Note : espnow et lora_sync sont toujours dans REQUIRES car le checker
 # de dépendances ESP-IDF scanne les #include sans évaluer les #if.
-# Ces composants sont compilés mais non utilisés sur ESP32-S3.
 
 set(meshpay_main_srcs
     "main.c"
