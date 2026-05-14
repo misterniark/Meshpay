@@ -1,0 +1,89 @@
+menu "Mesh Pay - LoRa"
+
+choice MESHPAY_LORA_DRIVER
+    prompt "Driver radio LoRa"
+    default MESHPAY_LORA_DRIVER_WIO_E5
+    help
+        Choix du module radio LoRa. Le LoRa est obligatoire sur tous les
+        devices ; cette option choisit uniquement quel driver materiel est
+        compile. Le code applicatif passe par hal_lora_create_default().
+
+    config MESHPAY_LORA_DRIVER_WIO_E5
+        bool "Grove Wio-E5 (UART / commandes AT)"
+
+    config MESHPAY_LORA_DRIVER_CORE1262
+        bool "Waveshare Core1262 (SX1262, SPI)"
+endchoice
+
+# --- Pins Core1262 (SX1262 SPI) — utilises si CORE1262 ---
+# Defauts verifies sur les schemas officiels Waveshare : header
+# d'extension P1 de l'ESP32-S3-Touch-LCD-1.47, GPIO IO1-IO11 libres.
+# SPI3_HOST = 2 dans l'enumeration spi_host_device_t d'ESP-IDF.
+config MESHPAY_LORA_C1262_SPI_HOST
+    int "Core1262 : hote SPI"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 2
+
+config MESHPAY_LORA_C1262_PIN_SCK
+    int "Core1262 : GPIO SCK"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 1
+
+config MESHPAY_LORA_C1262_PIN_MOSI
+    int "Core1262 : GPIO MOSI"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 2
+
+config MESHPAY_LORA_C1262_PIN_MISO
+    int "Core1262 : GPIO MISO"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 3
+
+config MESHPAY_LORA_C1262_PIN_NSS
+    int "Core1262 : GPIO NSS (chip-select)"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 4
+
+config MESHPAY_LORA_C1262_PIN_RESET
+    int "Core1262 : GPIO RESET"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 5
+
+config MESHPAY_LORA_C1262_PIN_BUSY
+    int "Core1262 : GPIO BUSY"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 6
+
+config MESHPAY_LORA_C1262_PIN_DIO1
+    int "Core1262 : GPIO DIO1 (IRQ)"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 7
+
+config MESHPAY_LORA_C1262_PIN_RXEN
+    int "Core1262 : GPIO RXEN (switch RF RX)"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 8
+
+config MESHPAY_LORA_C1262_PIN_TXEN
+    int "Core1262 : GPIO TXEN (switch RF TX)"
+    depends on MESHPAY_LORA_DRIVER_CORE1262
+    default 9
+
+# --- Pins Wio-E5 (UART/AT) — utilises si WIO_E5 ---
+# Anciennement des #define dans main/transport/transport_lora.c.
+config MESHPAY_LORA_WIOE5_UART_NUM
+    int "Wio-E5 : numero de port UART"
+    depends on MESHPAY_LORA_DRIVER_WIO_E5
+    default 2
+
+config MESHPAY_LORA_WIOE5_PIN_TX
+    int "Wio-E5 : GPIO TX"
+    depends on MESHPAY_LORA_DRIVER_WIO_E5
+    default 17
+
+config MESHPAY_LORA_WIOE5_PIN_RX
+    int "Wio-E5 : GPIO RX"
+    depends on MESHPAY_LORA_DRIVER_WIO_E5
+    default 16
+
+endmenu
