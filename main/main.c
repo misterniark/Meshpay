@@ -38,7 +38,7 @@
 #include "app_init/nvs_init.h"
 
 /*
- * Etat global et capabilites (MP_HAS_ESPNOW / MP_HAS_LORA) :
+ * Etat global et capabilites (MP_HAS_ESPNOW) :
  * voir app_state.h.
  *
  * Modules extraits au Lot D :
