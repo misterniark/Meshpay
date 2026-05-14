@@ -30,21 +30,34 @@ static const char *TAG = "sx126x_hal";
 /**
  * Attend que le SX1262 libere BUSY (niveau bas = pret).
  *
+ * Deux phases : une attente active courte (1 ms) qui couvre le cas
+ * normal — BUSY se libere en quelques dizaines de us — puis, si BUSY
+ * reste haut, des tranches de vTaskDelay(1) pour rendre la main au
+ * scheduler au lieu de monopoliser le CPU jusqu'au timeout.
+ *
  * @param hw Contexte materiel
  * @return SX126X_HAL_STATUS_OK si BUSY est bas, _ERROR sur timeout
  */
 static sx126x_hal_status_t wait_on_busy(const core1262_hw_t *hw)
 {
-    int waited_us = 0;
-    while (gpio_get_level(hw->pin_busy) == 1) {
-        esp_rom_delay_us(10);
-        waited_us += 10;
-        if (waited_us >= BUSY_TIMEOUT_MS * 1000) {
-            ESP_LOGE(TAG, "Timeout BUSY (%d ms)", BUSY_TIMEOUT_MS);
-            return SX126X_HAL_STATUS_ERROR;
+    /* Phase 1 : attente active courte (100 x 10 us = 1 ms max). */
+    for (int i = 0; i < 100; i++) {
+        if (gpio_get_level(hw->pin_busy) == 0) {
+            return SX126X_HAL_STATUS_OK;
         }
+        esp_rom_delay_us(10);
     }
-    return SX126X_HAL_STATUS_OK;
+
+    /* Phase 2 : BUSY toujours haut — on cede le CPU par tranches de 1 ms. */
+    for (int i = 0; i < (BUSY_TIMEOUT_MS - 1); i++) {
+        if (gpio_get_level(hw->pin_busy) == 0) {
+            return SX126X_HAL_STATUS_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    ESP_LOGE(TAG, "Timeout BUSY (%d ms)", BUSY_TIMEOUT_MS);
+    return SX126X_HAL_STATUS_ERROR;
 }
 
 sx126x_hal_status_t sx126x_hal_write(const void *context,
@@ -101,7 +114,7 @@ sx126x_hal_status_t sx126x_hal_read(const void *context,
 
     esp_err_t err = ESP_OK;
 
-    /* 1. Envoi de l'opcode + adresse (les octets de status sortis sont ignores). */
+    /* 1. Envoi de l'opcode + arguments (ce qui sort sur MISO est ignore). */
     spi_transaction_t t_cmd = {
         .length    = (size_t)command_length * 8,
         .tx_buffer = command,
