@@ -10,11 +10,13 @@
 set(lora_sync_srcs
     "src/lora_sync.c"
     "src/lora_frag.c"
+    "src/lora_tx_packetize.c"
 )
 
 idf_build_get_property(project_name PROJECT_NAME)
 if(project_name STREQUAL "meshpay_test_app")
     list(APPEND lora_sync_srcs "test/test_lora_frag.c")
+    list(APPEND lora_sync_srcs "test/test_lora_tx_packetize.c")
     idf_component_register(
         SRCS ${lora_sync_srcs}
         INCLUDE_DIRS "include"
