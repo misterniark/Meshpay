@@ -18,6 +18,7 @@
 #include "comm/lora_sync.h"
 #include "comm/comm_msg.h"
 #include "comm/lora_frag.h"
+#include "comm/lora_tx_packetize.h"
 #include "crypto/crypto_sign.h"
 #include "transaction/tx_serialize.h"
 #include "transaction/tx_validate.h"
@@ -37,6 +38,15 @@ static const char *TAG = "lora_sync";
  * appele depuis le contexte ISR ou une tache differente.
  */
 static lora_frag_ctx_t s_frag_ctx;
+
+/*
+ * Compteur de séquence pour la fragmentation des TX émises. Incrémenté à
+ * chaque TX fragmentée pour que le réassembleur du récepteur distingue
+ * deux séquences successives. Le wraparound 255->0 est sans conséquence :
+ * deux séquences distinctes ne coexistent jamais assez longtemps pour
+ * entrer en collision (timeout de réassemblage : 10 s).
+ */
+static uint8_t s_lora_tx_seq_id = 0;
 
 /** Spinlock protégeant l'acces concurrent a s_frag_ctx [H8] */
 static portMUX_TYPE s_frag_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -484,6 +494,70 @@ void lora_sync_handle_rx(const lora_sync_config_t *config,
  * Cycle de synchronisation
  * ================================================================ */
 
+/*
+ * Émet une transaction confirmée sur LoRa : un seul paquet LORA_TX si elle
+ * tient dans COMM_MSG_LORA_MAX octets, sinon plusieurs fragments LORA_FRAG.
+ *
+ * Avant ce helper, lora_sync_do_cycle() empaquetait chaque TX dans un
+ * buffer de 255 octets et ABANDONNAIT SILENCIEUSEMENT toute TX dont le
+ * CBOR dépassait 254 octets — soit toute TX TRANSFER à 2 parents. La
+ * fragmentation à l'émission (lora_frag_split) existait mais n'était
+ * jamais appelée.
+ *
+ * LIMITE : le récepteur n'a qu'un seul lora_frag_ctx. Si plusieurs TX
+ * fragmentées sont émises dans le même cycle, seule la dernière sera
+ * réassemblée ; les précédentes sont abandonnées à l'arrivée du premier
+ * fragment de la suivante. Les TX directes (non fragmentées) ne sont pas
+ * affectées. Tracé comme dette technique (note Doctech « 07 - Dette
+ * technique », entrée « Gossip LoRa fragile ») — à corriger si le volume
+ * de TX TRANSFER à 2 parents par cycle devient significatif.
+ */
+static void lora_sync_send_one_tx(const lora_sync_config_t *config,
+                                  const transaction_t *tx,
+                                  uint32_t index, uint32_t total)
+{
+    uint8_t packets[LORA_FRAG_MAX_FRAGMENTS][LORA_FRAG_PACKET_MAX];
+    size_t  packet_lens[LORA_FRAG_MAX_FRAGMENTS];
+    uint8_t packet_count = 0;
+
+    if (lora_tx_packetize(tx, s_lora_tx_seq_id,
+                          packets, packet_lens, &packet_count) != 0) {
+        ESP_LOGW(TAG, "TX %lu/%lu non émise : packetize a échoué "
+                      "(sérialisation ou > %d fragments)",
+                 (unsigned long)(index + 1), (unsigned long)total,
+                 LORA_FRAG_MAX_FRAGMENTS);
+        return;
+    }
+
+    /*
+     * Marquer ce seq_id comme utilisé AVANT l'envoi : si l'envoi est
+     * partiel, le récepteur a déjà pu voir des fragments portant cet id.
+     * Réutiliser le même id dans la TX suivante causerait une collision
+     * de réassemblage côté récepteur.
+     */
+    if (packet_count > 1) {
+        s_lora_tx_seq_id++;
+    }
+
+    /*
+     * Politique best-effort : on continue d'émettre les fragments suivants
+     * même si l'un échoue. Un échec `send()` LoRa est souvent transitoire
+     * (collision, CCA) ; abandonner toute la TX sur le premier raté serait
+     * pire. Les fragments manquants feront simplement échouer le
+     * réassemblage côté récepteur (timeout 10 s), sans collision avec la
+     * TX suivante puisque le seq_id a déjà été consommé.
+     */
+    for (uint8_t p = 0; p < packet_count; p++) {
+        hal_err_t err = config->lora->send(packets[p], packet_lens[p],
+                                            config->lora->ctx);
+        if (err != HAL_OK) {
+            ESP_LOGW(TAG, "Échec envoi LoRa TX %lu/%lu (paquet %u/%u)",
+                     (unsigned long)(index + 1), (unsigned long)total,
+                     (unsigned)(p + 1), (unsigned)packet_count);
+        }
+    }
+}
+
 void lora_sync_do_cycle(const lora_sync_config_t *config,
                          uint64_t *last_sync_ts)
 {
@@ -570,18 +644,8 @@ void lora_sync_do_cycle(const lora_sync_config_t *config,
 
     ESP_LOGI(TAG, "Sync LoRa : %lu TX à envoyer", (unsigned long)tx_count);
 
-    uint8_t buf[COMM_MSG_LORA_MAX];
     for (uint32_t i = 0; i < tx_count; i++) {
-        size_t buf_len;
-        if (comm_msg_pack_lora_tx(buf, sizeof(buf),
-                                   &tx_to_send[i], &buf_len) == 0) {
-            hal_err_t err = config->lora->send(buf, buf_len,
-                                                config->lora->ctx);
-            if (err != HAL_OK) {
-                ESP_LOGW(TAG, "Échec envoi LoRa TX %lu/%lu",
-                         (unsigned long)(i + 1), (unsigned long)tx_count);
-            }
-        }
+        lora_sync_send_one_tx(config, &tx_to_send[i], i, tx_count);
     }
 
     /* Mettre à jour le timestamp de dernière sync */
