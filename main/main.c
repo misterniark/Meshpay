@@ -378,7 +378,8 @@ void app_main(void)
     /*
      * Display : un par cible (ILI9341 sur CYD, JD9853 sur Waveshare).
      * ESP-NOW : sur les deux cibles (toute radio Wi-Fi le supporte).
-     * LoRa : uniquement sur les cartes qui embarquent un Wio-E5.
+     * LoRa : sur toutes les cibles ; le driver concret (Wio-E5, Core1262)
+     *        est selectionne par CONFIG_MESHPAY_LORA_DRIVER.
      */
 #if CONFIG_IDF_TARGET_ESP32
     hal_display_ili9341_create(&s_display);
@@ -391,7 +392,7 @@ void app_main(void)
         return;
     }
 
-    /* HAL LoRa + lora_sync_task (no-op sur cibles sans LoRa). */
+    /* HAL LoRa + lora_sync_task. */
     (void)transport_lora_init_and_start();
 
     ESP_LOGI(TAG, "[11/12] HAL initialises (ESP-NOW%s)",

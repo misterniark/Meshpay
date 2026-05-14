@@ -26,8 +26,8 @@ hal_err_t hal_lora_create_default(hal_lora_t *lora)
 
 #elif defined(CONFIG_MESHPAY_LORA_DRIVER_CORE1262)
 
-/* hal_lora_core1262.h est cree dans une tache ulterieure ; cette branche
- * n'est compilee que lorsque CONFIG_MESHPAY_LORA_DRIVER_CORE1262 est actif. */
+/* Cette branche n'est compilee que lorsque le driver Core1262 est
+ * selectionne (CONFIG_MESHPAY_LORA_DRIVER_CORE1262). */
 #include "hal_lora_core1262.h"
 
 hal_err_t hal_lora_create_default(hal_lora_t *lora)

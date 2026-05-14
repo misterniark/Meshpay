@@ -5,9 +5,8 @@
  * **Pourquoi cette couche ?**
  *
  * Avant le Lot D.3, les handlers et la core_task etaient parsemes de
- * `#ifdef MP_HAS_LORA ... s_lora_hal.send(...) ... #endif`. Sur ESP32-S3
- * (pas de Wio-E5 onboard), ces blocs etaient des trous beants dans la
- * logique.
+ * gardes `#ifdef` de compilation autour des appels LoRa. Sur les cibles
+ * sans module LoRa, ces blocs etaient des trous beants dans la logique.
  *
  * Cette facade fournit l'API LoRa sur tous les devices : une seule
  * implementation (`transport_lora.c`), toujours compilee. Le driver radio
