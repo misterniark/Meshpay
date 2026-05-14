@@ -2,7 +2,7 @@ menu "Mesh Pay - LoRa"
 
 choice MESHPAY_LORA_DRIVER
     prompt "Driver radio LoRa"
-    default MESHPAY_LORA_DRIVER_WIO_E5
+    default MESHPAY_LORA_DRIVER_CORE1262
     help
         Choix du module radio LoRa. Le LoRa est obligatoire sur tous les
         devices ; cette option choisit uniquement quel driver materiel est

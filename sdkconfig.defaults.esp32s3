@@ -24,3 +24,6 @@ CONFIG_SPIRAM_SPEED_80M=y
 # Phase 1 : frequency scaling seul (pas de light sleep). Le light sleep
 # (CONFIG_FREERTOS_USE_TICKLESS_IDLE) viendra en Phase 2.
 CONFIG_PM_ENABLE=y
+
+# --- LoRa : la carte Waveshare (ESP32-S3) est equipee du module Core1262 ---
+CONFIG_MESHPAY_LORA_DRIVER_CORE1262=y
