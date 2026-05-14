@@ -55,7 +55,7 @@
  * et compatible ligne par ligne. */
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #  include "driver/usb_serial_jtag.h"
-#  include "esp_vfs_usb_serial_jtag.h"
+#  include "driver/usb_serial_jtag_vfs.h"
 #elif CONFIG_ESP_CONSOLE_UART
 #  include "driver/uart.h"
 /* `driver/uart_vfs.h` est le remplacant de `esp_vfs_dev.h` depuis
@@ -346,7 +346,7 @@ static esp_err_t console_io_init(void)
          * dans un autre composant) — on accepte. */
         return err;
     }
-    esp_vfs_usb_serial_jtag_use_driver();
+    usb_serial_jtag_vfs_use_driver();
     return ESP_OK;
 
 #elif CONFIG_ESP_CONSOLE_UART
