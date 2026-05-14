@@ -11,9 +11,7 @@
 
 #if defined(CONFIG_MESHPAY_LORA_DRIVER_WIO_E5)
 
-/* Factory du driver Wio-E5 (UART/AT) — definie dans esp32/hal_lora_wio_e5.c */
-extern hal_err_t hal_lora_wio_e5_create(hal_lora_t *lora, int uart_num,
-                                        int tx_pin, int rx_pin);
+#include "hal_lora_wio_e5.h"
 
 hal_err_t hal_lora_create_default(hal_lora_t *lora)
 {
@@ -28,6 +26,8 @@ hal_err_t hal_lora_create_default(hal_lora_t *lora)
 
 #elif defined(CONFIG_MESHPAY_LORA_DRIVER_CORE1262)
 
+/* hal_lora_core1262.h est cree dans une tache ulterieure ; cette branche
+ * n'est compilee que lorsque CONFIG_MESHPAY_LORA_DRIVER_CORE1262 est actif. */
 #include "hal_lora_core1262.h"
 
 hal_err_t hal_lora_create_default(hal_lora_t *lora)

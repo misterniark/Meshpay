@@ -32,10 +32,14 @@ endif()
 # choisit uniquement le module radio. La factory unifiee masque le choix
 # au code applicatif.
 list(APPEND HAL_SRCS "src/hal_lora_factory.c")
+# src/esp32/ contient a la fois du code ESP-IDF partage (hal_storage_esp32.c)
+# et les drivers LoRa : ce repertoire d'includes sert les deux.
 list(APPEND HAL_PRIV_INCLUDE "src/esp32")
 if(CONFIG_MESHPAY_LORA_DRIVER_WIO_E5)
     list(APPEND HAL_SRCS "src/esp32/hal_lora_wio_e5.c")
 elseif(CONFIG_MESHPAY_LORA_DRIVER_CORE1262)
+    # GLOB est acceptable ici : sx126x/ est un driver vendore stable.
+    # Si un fichier est ajoute, lancer idf.py reconfigure manuellement.
     file(GLOB SX126X_SRCS "src/esp32/sx126x/*.c")
     list(APPEND HAL_SRCS
         ${SX126X_SRCS}
