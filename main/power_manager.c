@@ -14,7 +14,11 @@
 /* Etat interne du module (singleton). */
 static power_manager_config_t s_cfg;
 static power_state_t          s_state;
-static uint32_t               s_last_activity_ms;  /* tronque de get_time_ms */
+/* Horodatage de derniere activite, tronque de get_time_ms() (uint64 -> uint32).
+ * La soustraction wraparound-safe (now - s_last_activity_ms) reste correcte
+ * tant que le timeout est tres inferieur a ~49 jours (UINT32_MAX ms) — ce qui
+ * est garanti ici (timeout par defaut 120 s). */
+static uint32_t               s_last_activity_ms;
 static uint32_t               s_timeout_ms;
 
 /**
@@ -57,6 +61,9 @@ void power_manager_notify_activity(void)
 
 void power_manager_tick(void)
 {
+    /* Lecture hors lock : appel HAL potentiellement lent, on evite de
+     * tenir le mutex pendant l'I/O. Un snapshot vieux d'une iteration
+     * est inoffensif (au pire, une decision ACTIF maintenue un cycle). */
     hal_power_source_t src = s_cfg.get_power_source();
 
     s_cfg.lock();

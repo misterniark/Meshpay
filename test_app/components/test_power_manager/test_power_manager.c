@@ -53,6 +53,9 @@ TEST_CASE("power_usb_never_enters_eco", "[power_manager]")
 {
     setup(POWER_SOURCE_USB);
 
+    /* Etat initial attendu : ACTIF. */
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, power_manager_get_state());
+
     /* 10 minutes simulees sans aucune activite. */
     for (int i = 0; i < 600; i++) {
         s_fake_now_ms += 1000;

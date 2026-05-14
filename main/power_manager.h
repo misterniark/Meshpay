@@ -18,7 +18,6 @@
 #define MESHPAY_POWER_MANAGER_H
 
 #include <stdint.h>
-#include <stdbool.h>
 #include "hal/hal_power.h"
 
 /** Timeout d'inactivite avant passage en ECO (ms), sur batterie. */
