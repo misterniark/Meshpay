@@ -88,6 +88,10 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->point.x = pt.x;
         data->point.y = pt.y;
         data->state = LV_INDEV_STATE_PRESSED;
+        /* Signaler l'interaction au gestionnaire d'energie (feature 13). */
+        if (ctx->notify_activity != NULL) {
+            ctx->notify_activity();
+        }
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
     }

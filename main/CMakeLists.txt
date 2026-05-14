@@ -78,7 +78,7 @@ idf_component_register(
     REQUIRES wallet dag transaction crypto
              comm_protocol espnow lora_sync
              currency time_manager device_hal
-             nvs_flash esp_timer esp_wifi
+             nvs_flash esp_timer esp_wifi esp_pm
              ui
              debug_console
     PRIV_REQUIRES nvs_sec_provider esp_partition

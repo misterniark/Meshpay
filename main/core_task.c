@@ -20,6 +20,7 @@
 #include "transport/transport_lora.h"
 #include "ui_dispatch.h"
 #include "wallet/wallet_lock.h"
+#include "power_manager.h"
 
 static const char *TAG = "core";
 
@@ -127,6 +128,14 @@ void core_task(void *param)
         }
 
         xSemaphoreGive(s_state_mutex);
+
+        /* Gestion de l'energie (feature 13) — hors mutex applicatif :
+         * power_manager a son propre verrou. */
+        if (got == pdTRUE) {
+            /* Un evenement reseau est une interaction reseau. */
+            power_manager_notify_activity();
+        }
+        power_manager_tick();
 
         /*
          * Hors mutex : pomper les envois LoRa differes (relay

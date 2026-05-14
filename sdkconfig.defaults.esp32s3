@@ -18,3 +18,9 @@ CONFIG_SPIRAM_SPEED_80M=y
 # CONFIG_SECURE_BOOT=y
 # CONFIG_SECURE_BOOT_V2_ENABLED=y
 # CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+
+# --- Gestion de l'energie (feature 13) ---
+# Active esp_pm pour le CPU frequency scaling en mode ECO.
+# Phase 1 : frequency scaling seul (pas de light sleep). Le light sleep
+# (CONFIG_FREERTOS_USE_TICKLESS_IDLE) viendra en Phase 2.
+CONFIG_PM_ENABLE=y

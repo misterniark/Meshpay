@@ -139,6 +139,69 @@ extern void ui_task(void *pvParam);
 #include "ops/ops.h"
 #include "core_task.h"
 #include "ui_dispatch.h"
+#include "power_manager.h"
+#include "hal/hal_power.h"
+#include "esp_pm.h"
+
+/* ================================================================
+ * Gestion de l'energie (feature 13) — adaptateurs pour power_manager
+ * ================================================================ */
+
+/* Frequences CPU (MHz) pilotees par esp_pm selon l'etat d'energie.
+ * Definies ici (et non dans power_manager.c) car power_manager.c est
+ * dependance-pure : il ne connait pas esp_pm. */
+#define POWER_MAX_FREQ_MHZ        240
+#define POWER_ACTIF_MIN_FREQ_MHZ  240   /* ACTIF : pas de scaling */
+#define POWER_ECO_MIN_FREQ_MHZ     80   /* ECO   : scaling autorise */
+
+/* HAL source d'alimentation (stub : toujours USB tant que le hardware
+ * batterie n'existe pas). */
+static hal_power_t s_power_hal;
+
+/* Mutex dedie au power_manager : protege sa machine d'etats entre
+ * core_task (tick) et ui_task (notify_activity). Dedie pour ne pas
+ * interferer avec s_state_mutex. */
+static SemaphoreHandle_t s_power_mutex;
+
+/* Adaptateur get_power_source : power_manager attend une fonction sans
+ * argument, hal_power expose une vtable avec ctx. */
+static hal_power_source_t power_get_source_adapter(void)
+{
+    return s_power_hal.get_source(s_power_hal.ctx);
+}
+
+/* Adaptateur set_backlight : delegue au HAL display. */
+static void power_set_backlight_adapter(uint8_t pct)
+{
+    if (s_display.set_backlight != NULL) {
+        s_display.set_backlight(pct, s_display.ctx);
+    }
+}
+
+/* Adaptateur apply_pm_config : configure esp_pm selon l'etat.
+ * Phase 1 : frequency scaling seul, light_sleep_enable reste false. */
+static void power_apply_pm_config(power_state_t state)
+{
+    esp_pm_config_t pm = {
+        .max_freq_mhz       = POWER_MAX_FREQ_MHZ,
+        .min_freq_mhz       = (state == POWER_STATE_ECO)
+                                  ? POWER_ECO_MIN_FREQ_MHZ
+                                  : POWER_ACTIF_MIN_FREQ_MHZ,
+        .light_sleep_enable = false,   /* Phase 1 : pas de light sleep */
+    };
+    esp_err_t err = esp_pm_configure(&pm);
+    if (err != ESP_OK) {
+        /* Sur le CYD, CONFIG_PM_ENABLE n'est pas active : esp_pm_configure
+         * renvoie ESP_ERR_NOT_SUPPORTED. C'est attendu et sans consequence
+         * (le power_manager du CYD est le stub, il n'appelle jamais ceci ;
+         * seul l'appel de boot ci-dessous le declenche). */
+        ESP_LOGD(TAG, "esp_pm_configure: 0x%x (attendu si PM desactive)", err);
+    }
+}
+
+/* Adaptateurs lock/unlock : mutex dedie au power_manager. */
+static void power_lock(void)   { xSemaphoreTake(s_power_mutex, portMAX_DELAY); }
+static void power_unlock(void) { xSemaphoreGive(s_power_mutex); }
 
 /* ================================================================
  * Point d'entree
@@ -366,6 +429,31 @@ void app_main(void)
 
     /* lora_sync_task est creee dans transport_lora_init_and_start (deja appele). */
 
+    /* ---- Gestion de l'energie (feature 13) ---- */
+    /* Config esp_pm de boot : etat ACTIF (pas de scaling). */
+    power_apply_pm_config(POWER_STATE_ACTIF);
+
+    s_power_mutex = xSemaphoreCreateMutex();
+    if (s_power_mutex == NULL) {
+        ESP_LOGE(TAG, "Erreur creation s_power_mutex");
+        return;
+    }
+
+    hal_power_stub_create(&s_power_hal);
+
+    power_manager_config_t power_cfg = {
+        .get_time_ms      = get_time_ms_wrapper,
+        .get_power_source = power_get_source_adapter,
+        .set_backlight    = power_set_backlight_adapter,
+        .apply_pm_config  = power_apply_pm_config,
+        .lock             = power_lock,
+        .unlock           = power_unlock,
+        .eco_timeout_ms   = POWER_ECO_TIMEOUT_MS,
+    };
+    power_manager_init(&power_cfg);
+    ESP_LOGI(TAG, "Gestion energie initialisee (etat ACTIF, source=%s)",
+             power_get_source_adapter() == POWER_SOURCE_USB ? "USB" : "batterie");
+
     /* Tache core — commune aux deux targets */
     xTaskCreate(core_task, "core", CORE_TASK_STACK, NULL,
                 CORE_TASK_PRIO, NULL);
@@ -410,6 +498,7 @@ void app_main(void)
      * Cette information est utilisee par l'UI pour autoriser l'acces admin. */
     s_ui_ctx.compute_melted_balance = compute_melted_balance;
     s_ui_ctx.get_owner_balance      = ui_get_owner_balance;
+    s_ui_ctx.notify_activity        = power_manager_notify_activity;
 
     s_ui_ctx.is_master = false;
     for (uint32_t i = 0; i < s_currency.mint_authority_count; i++) {
