@@ -1,13 +1,13 @@
 /**
  * @file transport/transport_lora.c
- * @brief Implementation reelle de la facade LoRa (cible ESP32 CYD).
- *
- * Compile uniquement quand `CONFIG_IDF_TARGET_ESP32` (cf. CMakeLists.txt).
- * Sur les autres cibles, c'est `transport_lora_stub.c` qui est lie.
+ * @brief Implementation de la facade LoRa — toujours compilee, tous devices.
  *
  * Owne toute la couche LoRa : HAL physique, buffers relay/pong, callbacks
- * pour lora_sync_task. Le reste du firmware n'a plus aucun `#ifdef` autour
+ * pour lora_sync_task. Le reste du firmware n'a aucun `#ifdef` autour
  * d'un appel LoRa.
+ *
+ * Le driver radio concret (Wio-E5, Core1262, …) est choisi par
+ * CONFIG_MESHPAY_LORA_DRIVER dans Kconfig (composant device_hal).
  */
 
 #include "transport_lora.h"
@@ -24,22 +24,15 @@
 #include "comm/comm_msg.h"
 #include "comm/lora_sync.h"
 #include "hal/hal_lora.h"
+#include "hal/hal_lora_factory.h"
 #include "time_glue.h"
 #include "transaction/tx_types.h"
-
-extern hal_err_t hal_lora_wio_e5_create(hal_lora_t *lora, int uart_num,
-                                        int tx_pin, int rx_pin);
 
 static const char *TAG = "tport_lora";
 
 /* ----------------------------------------------------------------
  * Constantes specifiques LoRa (anciennement dans app_state.h)
  * ---------------------------------------------------------------- */
-
-/** Pins LoRa Wio-E5 (UART2) — ESP32 CYD uniquement. */
-#define LORA_UART_NUM    2
-#define LORA_TX_PIN     17
-#define LORA_RX_PIN     16
 
 /** Intervalle de sync LoRa (ms). */
 #define LORA_SYNC_INTERVAL_MS  120000
@@ -141,9 +134,8 @@ bool transport_lora_available(void)
 
 hal_err_t transport_lora_init_and_start(void)
 {
-    /* 1. HAL physique. */
-    hal_err_t err = hal_lora_wio_e5_create(&s_lora_hal, LORA_UART_NUM,
-                                           LORA_TX_PIN, LORA_RX_PIN);
+    /* 1. HAL physique — le driver concret est choisi par Kconfig. */
+    hal_err_t err = hal_lora_create_default(&s_lora_hal);
     if (err != HAL_OK) {
         ESP_LOGW(TAG, "HAL LoRa init echoue (%d) — fonctionnement sans LoRa", err);
         return err;

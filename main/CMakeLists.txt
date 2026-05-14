@@ -55,14 +55,10 @@ else()
     list(APPEND meshpay_main_srcs "app_init/nvs_init_plain.c")
 endif()
 
-# Lot D.3 : facade LoRa. Sur ESP32 (CYD) : impl reelle. Sur autres
-# cibles (ESP32-S3, etc.) : stub no-op. Le code applicatif n'a plus
-# aucun `#ifdef MP_HAS_LORA` autour des appels.
-if(CONFIG_IDF_TARGET_ESP32)
-    list(APPEND meshpay_main_srcs "transport/transport_lora.c")
-else()
-    list(APPEND meshpay_main_srcs "transport/transport_lora_stub.c")
-endif()
+# Facade LoRa. Le LoRa est obligatoire sur tous les devices : l'impl
+# reelle est toujours compilee. Le driver radio concret (Wio-E5 /
+# Core1262) est choisi par CONFIG_MESHPAY_LORA_DRIVER dans device_hal.
+list(APPEND meshpay_main_srcs "transport/transport_lora.c")
 
 # Gestion de l'energie (feature 13) : impl reelle sur ESP32-S3, stub
 # no-op sur le CYD (ESP32). Le CYD reste toujours pleinement reactif.
