@@ -86,6 +86,11 @@ void power_manager_tick(void);
 
 /**
  * @brief Retourne l'etat courant.
+ *
+ * Lecture best-effort non protegee par le verrou : s_state est volatile
+ * et les ecritures sont sous lock, mais l'appelant peut obtenir une
+ * valeur d'une iteration de retard. Acceptable comme hint d'etat, pas
+ * pour une decision critique.
  */
 power_state_t power_manager_get_state(void);
 

@@ -132,7 +132,9 @@ void core_task(void *param)
         /* Gestion de l'energie (feature 13) — hors mutex applicatif :
          * power_manager a son propre verrou. */
         if (got == pdTRUE) {
-            /* Un evenement reseau est une interaction reseau. */
+            /* Tout evenement reseau entrant maintient le device ACTIF :
+             * un terminal de paiement qui recoit du trafic ne doit pas
+             * s'eteindre. Choix de design conforme a la spec feature 13. */
             power_manager_notify_activity();
         }
         power_manager_tick();

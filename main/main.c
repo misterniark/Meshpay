@@ -430,14 +430,14 @@ void app_main(void)
     /* lora_sync_task est creee dans transport_lora_init_and_start (deja appele). */
 
     /* ---- Gestion de l'energie (feature 13) ---- */
-    /* Config esp_pm de boot : etat ACTIF (pas de scaling). */
-    power_apply_pm_config(POWER_STATE_ACTIF);
-
     s_power_mutex = xSemaphoreCreateMutex();
     if (s_power_mutex == NULL) {
         ESP_LOGE(TAG, "Erreur creation s_power_mutex");
         return;
     }
+
+    /* Config esp_pm de boot : etat ACTIF (pas de scaling). */
+    power_apply_pm_config(POWER_STATE_ACTIF);
 
     hal_power_stub_create(&s_power_hal);
 

@@ -13,7 +13,7 @@
 
 /* Etat interne du module (singleton). */
 static power_manager_config_t s_cfg;
-static power_state_t          s_state;
+static volatile power_state_t s_state;
 /* Horodatage de derniere activite, tronque de get_time_ms() (uint64 -> uint32).
  * La soustraction wraparound-safe (now - s_last_activity_ms) reste correcte
  * tant que le timeout est tres inferieur a ~49 jours (UINT32_MAX ms) — ce qui
