@@ -4,7 +4,7 @@
 # ESP32  (CYD)       : ILI9341 display, Wio-E5 LoRa, NVS storage
 # ESP32-S3 (Waveshare) : JD9853 display, NVS storage (client-only, pas de LoRa)
 
-set(HAL_SRCS "")
+set(HAL_SRCS "src/hal_power_stub.c")
 set(HAL_PRIV_INCLUDE "")
 
 if(CONFIG_IDF_TARGET_ESP32)
@@ -32,6 +32,7 @@ if(project_name STREQUAL "meshpay_test_app")
         "src/mock/hal_display_mock.c"
         "src/mock/hal_lora_mock.c"
         "test/test_hal_storage.c"
+        "test/test_hal_power.c"
     )
     list(APPEND HAL_PRIV_INCLUDE "src/mock")
     idf_component_register(
