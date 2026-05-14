@@ -8,7 +8,6 @@
 /* Plages valides cote HAL. */
 #define SF_MIN  7
 #define SF_MAX  12
-#define BW_MAX  2   /* 0=125, 1=250, 2=500 */
 #define CR_MIN  1   /* 1=4/5 */
 #define CR_MAX  4   /* 4=4/8 */
 
@@ -45,12 +44,15 @@ bool core1262_map_config(const hal_lora_config_t *cfg,
 
     /*
      * --- LDRO (Low Data Rate Optimize) ---
-     * Recommande par Semtech quand la duree d'un symbole depasse ~16 ms,
-     * ce qui arrive aux SF eleves sur bande etroite. Regle pratique :
-     * actif pour SF11 et SF12 en BW125 kHz (cfg->bandwidth == 0).
+     * Obligatoire quand la duree d'un symbole LoRa (2^SF / BW) depasse
+     * ~16 ms (Semtech AN). Les combinaisons concernees :
+     *   - SF11 ou SF12 en BW125 kHz (cfg->bandwidth == 0)
+     *   - SF12 en BW250 kHz         (cfg->bandwidth == 1)
      */
-    out->mod.ldro = ((cfg->spreading_factor >= 11) && (cfg->bandwidth == 0))
-                        ? 1 : 0;
+    out->mod.ldro =
+        (((cfg->spreading_factor >= 11) && (cfg->bandwidth == 0)) ||
+         ((cfg->spreading_factor == 12) && (cfg->bandwidth == 1)))
+            ? 1 : 0;
 
     /* --- Parametres de paquet LoRa : header explicite, CRC actif. --- */
     out->pkt.preamble_len_in_symb = 8;
