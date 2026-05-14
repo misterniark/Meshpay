@@ -4,6 +4,11 @@
 # ESP32  (CYD)       : ILI9341 display, Wio-E5 LoRa, NVS storage
 # ESP32-S3 (Waveshare) : JD9853 display, NVS storage (client-only, pas de LoRa)
 
+# hal_power_stub.c est compilé pour TOUTES les cibles : c'est l'impl
+# de production de hal_power tant que le hardware de détection batterie
+# n'existe pas (elle renvoie toujours USB). Ce n'est pas un mock de test.
+# À déplacer dans les blocs target le jour où une vraie impl GPIO/ADC
+# arrive. Voir la spec "13 - Gestion de l'énergie".
 set(HAL_SRCS "src/hal_power_stub.c")
 set(HAL_PRIV_INCLUDE "")
 
