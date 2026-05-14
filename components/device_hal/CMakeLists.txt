@@ -47,6 +47,11 @@ elseif(CONFIG_MESHPAY_LORA_DRIVER_CORE1262)
         "src/esp32/core1262_params.c"
         "src/esp32/hal_lora_core1262.c"
     )
+    # Le sous-repertoire sx126x/ contient les en-tetes du pilote Semtech
+    # (sx126x.h, sx126x_hal.h, sx126x_status.h). Il doit etre dans le
+    # chemin d'includes pour que sx126x_hal.c, core1262_params.c et
+    # hal_lora_core1262.c puissent les trouver avec #include "sx126x.h".
+    list(APPEND HAL_PRIV_INCLUDE "src/esp32/sx126x")
 endif()
 
 idf_build_get_property(project_name PROJECT_NAME)
