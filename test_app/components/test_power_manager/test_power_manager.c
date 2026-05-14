@@ -115,3 +115,57 @@ TEST_CASE("power_activity_returns_to_actif", "[power_manager]")
     TEST_ASSERT_EQUAL(2, s_backlight_calls);
     TEST_ASSERT_EQUAL(2, s_pm_calls);
 }
+
+TEST_CASE("power_activity_resets_timeout", "[power_manager]")
+{
+    setup(POWER_SOURCE_BATTERY);
+
+    /* Inactif pendant 4 s (timeout = 5 s). */
+    s_fake_now_ms += 4000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, power_manager_get_state());
+
+    /* Activite a t=4 s : reset de l'horodatage. */
+    power_manager_notify_activity();
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, power_manager_get_state());
+
+    /* 4 s de plus (t=8 s absolu, mais seulement 4 s depuis l'activite). */
+    s_fake_now_ms += 4000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, power_manager_get_state());
+
+    /* 2 s de plus => 6 s depuis l'activite => ECO. */
+    s_fake_now_ms += 2000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(POWER_STATE_ECO, power_manager_get_state());
+}
+
+TEST_CASE("power_source_change_live_returns_to_actif", "[power_manager]")
+{
+    setup(POWER_SOURCE_BATTERY);
+
+    /* Passer en ECO sur batterie. */
+    s_fake_now_ms += 6000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(POWER_STATE_ECO, power_manager_get_state());
+
+    /* L'USB est branche : la source devient USB. */
+    s_fake_source = POWER_SOURCE_USB;
+    s_fake_now_ms += 1000;
+    power_manager_tick();
+
+    /* Le prochain tick force le retour en ACTIF. */
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, power_manager_get_state());
+    TEST_ASSERT_EQUAL(100, s_last_backlight);
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, s_last_pm_state);
+}
+
+TEST_CASE("power_unknown_treated_as_battery", "[power_manager]")
+{
+    setup(POWER_SOURCE_UNKNOWN);
+
+    /* UNKNOWN doit se comporter comme BATTERY : ECO apres timeout. */
+    s_fake_now_ms += 6000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(POWER_STATE_ECO, power_manager_get_state());
+}
