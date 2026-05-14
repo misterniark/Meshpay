@@ -40,6 +40,10 @@
 
 #include <string.h>
 
+/* sx126x_write_buffer prend une taille uint8_t : la limite HAL doit tenir. */
+_Static_assert(HAL_LORA_MAX_PACKET_SIZE <= 255,
+               "HAL_LORA_MAX_PACKET_SIZE depasse la limite SX1262 (255)");
+
 static const char *TAG = "hal_lora_c1262";
 
 /* ================================================================
@@ -78,7 +82,7 @@ typedef struct {
     core1262_radio_params_t params;       /**< Parametres radio derives de la config */
 
     bool                    initialized;
-    bool                    rx_running;
+    volatile bool           rx_running;
     hal_lora_rx_cb_t        rx_cb;
     void                   *rx_user_ctx;
 
@@ -176,11 +180,13 @@ static hal_err_t apply_radio_config(core1262_ctx_t *ctx)
     st = sx126x_set_buffer_base_address(sx, 0x00, 0x00);
     if (st != SX126X_STATUS_OK) return HAL_ERR_IO;
 
-    /* Routage des IRQ : TX_DONE/RX_DONE/TIMEOUT actives ; seuls
-     * RX_DONE et TIMEOUT sont routes sur le pin DIO1. TX_DONE reste
-     * lisible dans le registre de status (scrute par send()). */
+    /* Routage des IRQ : TX_DONE/RX_DONE/TIMEOUT/CRC_ERROR actives dans le
+     * registre d'etat. Seuls RX_DONE et TIMEOUT sont routes sur DIO1 (le
+     * SX1262 leve RX_DONE meme pour un paquet CRC invalide, ce qui permet
+     * a la tache RX de detecter et rejeter les paquets corrompus). TX_DONE
+     * reste lisible dans le registre de status (scrute par send()). */
     const uint16_t irq_mask  = SX126X_IRQ_TX_DONE | SX126X_IRQ_RX_DONE |
-                               SX126X_IRQ_TIMEOUT;
+                               SX126X_IRQ_TIMEOUT | SX126X_IRQ_CRC_ERROR;
     const uint16_t dio1_mask = SX126X_IRQ_RX_DONE | SX126X_IRQ_TIMEOUT;
     st = sx126x_set_dio_irq_params(sx, irq_mask, dio1_mask, 0x0000, 0x0000);
     if (st != SX126X_STATUS_OK) return HAL_ERR_IO;
@@ -216,30 +222,51 @@ static void c1262_rx_task(void *param)
         sx126x_get_irq_status(sx, &irq);
         sx126x_clear_irq_status(sx, irq);
 
+        /* M2 : signaler un TIMEOUT inattendu en mode continu (ne devrait pas
+         * arriver avec SX126X_RX_CONTINUOUS, utile pour le debug materiel). */
+        if (irq & SX126X_IRQ_TIMEOUT) {
+            ESP_LOGW(TAG, "RX : IRQ TIMEOUT inattendu en mode continu");
+        }
+
         int     pkt_len = -1;
         int16_t rssi    = 0;
 
         if (irq & SX126X_IRQ_RX_DONE) {
-            sx126x_rx_buffer_status_t rxb = {0};
-            if (sx126x_get_rx_buffer_status(sx, &rxb) == SX126X_STATUS_OK &&
-                rxb.pld_len_in_bytes > 0 &&
-                rxb.pld_len_in_bytes <= HAL_LORA_MAX_PACKET_SIZE) {
+            /* M3(b) : rejeter silencieusement les paquets avec CRC invalide. */
+            if (irq & SX126X_IRQ_CRC_ERROR) {
+                ESP_LOGW(TAG, "RX : paquet rejete (CRC invalide)");
+            } else {
+                sx126x_rx_buffer_status_t rxb = {0};
+                if (sx126x_get_rx_buffer_status(sx, &rxb) == SX126X_STATUS_OK &&
+                    rxb.pld_len_in_bytes > 0 &&
+                    rxb.pld_len_in_bytes <= HAL_LORA_MAX_PACKET_SIZE) {
 
-                if (sx126x_read_buffer(sx, rxb.buffer_start_pointer, pkt_buf,
-                                       rxb.pld_len_in_bytes) == SX126X_STATUS_OK) {
-                    pkt_len = rxb.pld_len_in_bytes;
+                    if (sx126x_read_buffer(sx, rxb.buffer_start_pointer, pkt_buf,
+                                           rxb.pld_len_in_bytes) == SX126X_STATUS_OK) {
+                        pkt_len = rxb.pld_len_in_bytes;
 
-                    sx126x_pkt_status_lora_t pst = {0};
-                    if (sx126x_get_lora_pkt_status(sx, &pst) == SX126X_STATUS_OK) {
-                        rssi = pst.rssi_pkt_in_dbm;
+                        sx126x_pkt_status_lora_t pst = {0};
+                        if (sx126x_get_lora_pkt_status(sx, &pst) == SX126X_STATUS_OK) {
+                            rssi = pst.rssi_pkt_in_dbm;
+                        }
                     }
                 }
             }
         }
 
-        /* Re-armer la reception continue (SX126X_RX_CONTINUOUS = 0x00FFFFFF).
-         * Ne pas utiliser timeout=0 qui correspond a SX126X_RX_SINGLE_MODE
-         * (reception unique puis retour en standby). */
+        /* C1 : si sleep() a demande l'arret pendant qu'on tenait le mutex,
+         * ne PAS re-armer le radio : on sort de la boucle proprement.
+         * Sans ce test, sleep() pourrait remettre le SX1262 en standby
+         * puis cette tache le re-basculerait en reception (race). */
+        if (!ctx->rx_running) {
+            xSemaphoreGive(ctx->radio_mutex);
+            break;
+        }
+
+        /* En mode CONTINUOUS le SX1262 reste en RX apres chaque paquet ;
+         * ce SetRx est defensif (reaffirme l'etat radio apres traitement
+         * de l'IRQ). Comportement a confirmer au smoke test materiel
+         * (Task 9) : si redondant sans effet de bord, il pourra etre retire. */
         rf_switch_rx(ctx);
         sx126x_set_rx_with_timeout_in_rtc_step(sx, SX126X_RX_CONTINUOUS);
 
@@ -337,17 +364,23 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
         return HAL_ERR_IO;
     }
 
+    /* rc est utilise par les chemins d'erreur goto pour propager le code
+     * d'erreur jusqu'aux labels de nettoyage. Initialise a HAL_ERR_IO
+     * (valeur la plus courante en cas d'echec materiel/SPI). */
+    hal_err_t rc = HAL_ERR_IO;
+
     /* 4. Reset materiel du SX1262. */
     if (sx126x_hal_reset(&ctx->hw) != SX126X_HAL_STATUS_OK) {
         ESP_LOGE(TAG, "Reset SX1262 echoue (BUSY bloque ?)");
-        return HAL_ERR_IO;
+        rc = HAL_ERR_IO;
+        goto fail_spi;
     }
 
     /* 5. Sequence de configuration radio. */
-    hal_err_t rc = apply_radio_config(ctx);
+    rc = apply_radio_config(ctx);
     if (rc != HAL_OK) {
         ESP_LOGE(TAG, "Configuration radio echouee");
-        return rc;
+        goto fail_spi;
     }
 
     /* 6. Mutex + semaphore + ISR DIO1. */
@@ -355,7 +388,8 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
     ctx->dio1_sem    = xSemaphoreCreateBinary();
     if (!ctx->radio_mutex || !ctx->dio1_sem) {
         ESP_LOGE(TAG, "Creation des primitives FreeRTOS echouee");
-        return HAL_ERR_NO_MEM;
+        rc = HAL_ERR_NO_MEM;
+        goto fail_isr;
     }
 
     /* gpio_install_isr_service peut deja avoir ete appele par un autre
@@ -363,12 +397,14 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
     err = gpio_install_isr_service(0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "gpio_install_isr_service echoue: %d", err);
-        return HAL_ERR_IO;
+        rc = HAL_ERR_IO;
+        goto fail_isr;
     }
     err = gpio_isr_handler_add(ctx->pin_dio1, dio1_isr_handler, ctx);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "gpio_isr_handler_add echoue: %d", err);
-        return HAL_ERR_IO;
+        rc = HAL_ERR_IO;
+        goto fail_isr;
     }
 
     /* Switch RF au repos en reception. */
@@ -381,6 +417,20 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
              (unsigned)ctx->params.mod.sf,
              (int)ctx->params.power_dbm);
     return HAL_OK;
+
+fail_isr:
+    /* Les semaphores ont ete crees : les liberer (gardes par if pour
+     * tolerer une creation partielle, ex: radio_mutex OK mais dio1_sem NULL). */
+    if (ctx->dio1_sem)    { vSemaphoreDelete(ctx->dio1_sem);    ctx->dio1_sem    = NULL; }
+    if (ctx->radio_mutex) { vSemaphoreDelete(ctx->radio_mutex); ctx->radio_mutex = NULL; }
+    /* Tomber sur fail_spi pour liberer aussi le bus SPI. */
+
+fail_spi:
+    /* Le bus + device SPI ont ete crees : les liberer. */
+    spi_bus_remove_device(ctx->hw.spi);
+    spi_bus_free(ctx->spi_host);
+    ctx->hw.spi = NULL;
+    return rc;
 }
 
 static hal_err_t c1262_send(const uint8_t *data, size_t len, void *ctx_ptr)
@@ -412,11 +462,12 @@ static hal_err_t c1262_send(const uint8_t *data, size_t len, void *ctx_ptr)
         goto done;
     }
 
-    /* 3. Effacer les IRQ residuelles, basculer le switch en TX, emettre.
-     * timeout=0 dans sx126x_set_tx() signifie pas de timeout interne
-     * (le chip reste en TX jusqu'a fin d'emission). */
+    /* 3. Effacer les IRQ residuelles, basculer le switch en TX, emettre. */
     sx126x_clear_irq_status(sx, SX126X_IRQ_TX_DONE | SX126X_IRQ_TIMEOUT);
     rf_switch_tx(ctx);
+    /* timeout chip = 0 : pas de timeout materiel. La protection contre un
+     * SX1262 bloque en TX est assuree par le timeout logiciel ci-dessous
+     * (boucle de scrutation, C1262_TX_TIMEOUT_MS). */
     if (sx126x_set_tx(sx, 0) != SX126X_STATUS_OK) {
         result = HAL_ERR_IO;
         goto done;
@@ -484,12 +535,17 @@ static hal_err_t c1262_start_rx(void *ctx_ptr)
         return HAL_ERR_NO_MEM;
     }
 
-    /* Lancer la reception continue en mode SX126X_RX_CONTINUOUS. */
-    if (xSemaphoreTake(ctx->radio_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        rf_switch_rx(ctx);
-        sx126x_set_rx_with_timeout_in_rtc_step(&ctx->hw, SX126X_RX_CONTINUOUS);
-        xSemaphoreGive(ctx->radio_mutex);
+    /* Lancer la reception continue. */
+    if (xSemaphoreTake(ctx->radio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "start_rx : impossible d'armer la reception (mutex indisponible)");
+        ctx->rx_running = false;
+        vTaskDelete(ctx->rx_task_handle);
+        ctx->rx_task_handle = NULL;
+        return HAL_ERR_BUSY;
     }
+    rf_switch_rx(ctx);
+    sx126x_set_rx_with_timeout_in_rtc_step(&ctx->hw, SX126X_RX_CONTINUOUS);
+    xSemaphoreGive(ctx->radio_mutex);
 
     ESP_LOGI(TAG, "Mode reception active");
     return HAL_OK;
