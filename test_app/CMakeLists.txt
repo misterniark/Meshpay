@@ -33,6 +33,7 @@ set(EXTRA_COMPONENT_DIRS
     "../components/currency"
     "../components/ui"
     "../components/debug_console"
+    "components/test_power_manager"
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

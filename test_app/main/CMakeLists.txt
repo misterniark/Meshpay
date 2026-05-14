@@ -19,4 +19,5 @@ idf_component_register(
              device_hal
              ui
              debug_console
+             test_power_manager
 )
