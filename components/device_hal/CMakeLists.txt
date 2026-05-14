@@ -59,6 +59,10 @@ if(project_name STREQUAL "meshpay_test_app")
         "test/test_hal_storage.c"
         "test/test_hal_power.c"
     )
+    # Test du mapper Core1262 : uniquement quand ce driver est compile.
+    if(CONFIG_MESHPAY_LORA_DRIVER_CORE1262)
+        list(APPEND HAL_SRCS "test/test_core1262_params.c")
+    endif()
     list(APPEND HAL_PRIV_INCLUDE "src/mock")
     idf_component_register(
         SRCS ${HAL_SRCS}
