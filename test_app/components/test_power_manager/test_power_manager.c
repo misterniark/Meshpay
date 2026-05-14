@@ -94,3 +94,24 @@ TEST_CASE("power_battery_enters_eco_after_timeout", "[power_manager]")
     TEST_ASSERT_EQUAL(1, s_backlight_calls);
     TEST_ASSERT_EQUAL(1, s_pm_calls);
 }
+
+TEST_CASE("power_activity_returns_to_actif", "[power_manager]")
+{
+    setup(POWER_SOURCE_BATTERY);
+
+    /* Forcer le passage en ECO. */
+    s_fake_now_ms += 6000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(POWER_STATE_ECO, power_manager_get_state());
+
+    /* Une interaction => retour immediat en ACTIF. */
+    s_fake_now_ms += 500;
+    power_manager_notify_activity();
+
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, power_manager_get_state());
+    TEST_ASSERT_EQUAL(100, s_last_backlight);
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, s_last_pm_state);
+    /* 2 appels backlight au total : 1 pour ECO, 1 pour le retour ACTIF. */
+    TEST_ASSERT_EQUAL(2, s_backlight_calls);
+    TEST_ASSERT_EQUAL(2, s_pm_calls);
+}
