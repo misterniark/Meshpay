@@ -90,6 +90,7 @@ TEST_CASE("packetize_large_tx_fragments", "[lora_tx_packetize]")
         TEST_ASSERT_EQUAL(count, packets[i][2]);              /* total */
         TEST_ASSERT_EQUAL(42, packets[i][3]);                 /* seq_id */
         TEST_ASSERT_GREATER_OR_EQUAL(LORA_FRAG_HEADER_SIZE, packet_lens[i]);
+        TEST_ASSERT_LESS_OR_EQUAL(LORA_FRAG_PACKET_MAX, packet_lens[i]);
     }
 }
 

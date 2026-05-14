@@ -34,6 +34,11 @@ int lora_tx_packetize(const transaction_t *tx,
      * Cas direct : [type:1][cbor...] tient dans un paquet LoRa. Le byte de
      * type est nécessaire ici car le récepteur appelle
      * comm_msg_unpack_lora_tx() sur le paquet entier.
+     *
+     * Borne : le paquet total (1 + cbor_len) doit tenir dans
+     * COMM_MSG_LORA_MAX (255 octets, limite physique LoRa). La condition
+     * est donc bien `<=` et non `<` : un CBOR de 254 octets donne un
+     * paquet de 255 (accepté), un CBOR de 255 donne 256 (fragmenté).
      */
     if (1 + cbor_len <= COMM_MSG_LORA_MAX) {
         packets[0][0] = COMM_MSG_LORA_TX;

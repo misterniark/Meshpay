@@ -539,6 +539,14 @@ static void lora_sync_send_one_tx(const lora_sync_config_t *config,
         s_lora_tx_seq_id++;
     }
 
+    /*
+     * Politique best-effort : on continue d'émettre les fragments suivants
+     * même si l'un échoue. Un échec `send()` LoRa est souvent transitoire
+     * (collision, CCA) ; abandonner toute la TX sur le premier raté serait
+     * pire. Les fragments manquants feront simplement échouer le
+     * réassemblage côté récepteur (timeout 10 s), sans collision avec la
+     * TX suivante puisque le seq_id a déjà été consommé.
+     */
     for (uint8_t p = 0; p < packet_count; p++) {
         hal_err_t err = config->lora->send(packets[p], packet_lens[p],
                                             config->lora->ctx);
