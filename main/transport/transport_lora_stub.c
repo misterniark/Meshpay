@@ -50,3 +50,8 @@ void transport_lora_queue_pong_delayed(const uint8_t *buf, size_t len,
 void transport_lora_pump(void)
 {
 }
+
+void transport_lora_set_sync_interval(uint32_t interval_ms)
+{
+    (void)interval_ms;
+}

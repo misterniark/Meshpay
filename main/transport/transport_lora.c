@@ -267,3 +267,12 @@ void transport_lora_pump(void)
         }
     }
 }
+
+void transport_lora_set_sync_interval(uint32_t interval_ms)
+{
+    /* Memorise la nouvelle valeur dans la config de lora_sync_task.
+     * lora_sync_task relit sync_interval_ms a chaque cycle (cf.
+     * lora_sync.c : "Dormir sync_interval_ms"), donc la prise en
+     * compte est effective au cycle suivant. */
+    s_lora_cfg.sync_interval_ms = interval_ms;
+}

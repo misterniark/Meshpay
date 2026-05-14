@@ -94,6 +94,21 @@ void transport_lora_queue_pong_delayed(const uint8_t *buf, size_t len, uint32_t 
  */
 void transport_lora_pump(void);
 
+/**
+ * @brief Regle l'intervalle de sync LoRa (ms).
+ *
+ * Permet au power_manager de ralentir la sync en mode ECO. Sur le stub
+ * (cibles sans LoRa) : no-op. Sur l'impl reelle : memorise la valeur ;
+ * elle sera prise en compte au prochain cycle de lora_sync_task.
+ *
+ * NB : aujourd'hui inerte sur ESP32-S3 (lora_sync_task n'y tourne pas
+ * encore) et non appele sur le CYD (power_manager y est le stub). Le
+ * hook est pose pour le jour ou le S3 aura du LoRa.
+ *
+ * @param interval_ms Nouvel intervalle de sync en millisecondes.
+ */
+void transport_lora_set_sync_interval(uint32_t interval_ms);
+
 #ifdef __cplusplus
 }
 #endif

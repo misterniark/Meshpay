@@ -158,6 +158,11 @@ typedef struct ui_ctx_s {
      *  Evite le double-comptage initial_balance (bug C3) et reste coherent
      *  apres pruning du DAG (bug I1). NULL interdit. */
     uint32_t (*get_owner_balance)(void);
+
+    /** Signale une interaction utilisateur au gestionnaire d'energie.
+     *  Appele par ui_task sur chaque touch detecte. NULL autorise
+     *  (le gestionnaire d'energie est optionnel selon la cible). */
+    void (*notify_activity)(void);
 } ui_ctx_t;
 
 #endif /* UI_STATE_H */

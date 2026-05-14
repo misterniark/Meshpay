@@ -55,10 +55,6 @@
  * et compatible ligne par ligne. */
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
 #  include "driver/usb_serial_jtag.h"
-/* `driver/usb_serial_jtag_vfs.h` fournit l'API VFS v5.x
- * (usb_serial_jtag_vfs_use_driver). Pendant de `driver/uart_vfs.h` cote
- * UART : l'ancien `esp_vfs_usb_serial_jtag_use_driver` est deprecie et
- * vit dans esp_vfs_dev.h, pas dans esp_vfs_usb_serial_jtag.h. */
 #  include "driver/usb_serial_jtag_vfs.h"
 #elif CONFIG_ESP_CONSOLE_UART
 #  include "driver/uart.h"
