@@ -52,12 +52,13 @@
  * et les declarations de HAL associees.
  *
  * MP_HAS_ESPNOW : ESP-NOW sur tout device avec radio Wi-Fi (ESP32 + ESP32-S3).
- * MP_HAS_LORA   : LoRa Wio-E5 sur la carte CYD (ESP32 uniquement).
+ * MP_HAS_LORA   : LoRa Wio-E5 sur le CYD et le S3 Waveshare (les deux
+ *                 cibles embarquent un Wio-E5).
  */
 #if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
 #define MP_HAS_ESPNOW 1
 #endif
-#if CONFIG_IDF_TARGET_ESP32
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
 #define MP_HAS_LORA 1
 #endif
 

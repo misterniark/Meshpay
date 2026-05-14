@@ -315,7 +315,7 @@ void app_main(void)
     /*
      * Display : un par cible (ILI9341 sur CYD, JD9853 sur Waveshare).
      * ESP-NOW : sur les deux cibles (toute radio Wi-Fi le supporte).
-     * LoRa : uniquement sur les cartes qui embarquent un Wio-E5.
+     * LoRa : sur les deux cibles — CYD et S3 Waveshare embarquent un Wio-E5.
      */
 #if CONFIG_IDF_TARGET_ESP32
     hal_display_ili9341_create(&s_display);

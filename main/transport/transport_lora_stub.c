@@ -1,11 +1,14 @@
 /**
  * @file transport/transport_lora_stub.c
- * @brief Stub no-op de la facade LoRa (cibles sans Wio-E5, ex: ESP32-S3).
+ * @brief Stub no-op de la facade LoRa (cibles sans Wio-E5).
  *
- * Compile quand `CONFIG_IDF_TARGET_ESP32` n'est pas defini (cf. CMakeLists).
+ * Compile sur les cibles qui n'embarquent pas de Wio-E5 — c.-a-d. ni
+ * ESP32 CYD ni ESP32-S3 Waveshare (cf. CMakeLists). Aucune cible
+ * supportee actuellement ne tombe dans ce cas ; le stub reste pour
+ * d'eventuelles futures cibles sans LoRa.
  *
  * Aucun buffer, aucune logique : toutes les fonctions sont des no-ops.
- * Le code applicatif appelle la facade sans #ifdef ; sur ESP32-S3, ces
+ * Le code applicatif appelle la facade sans #ifdef ; sur ces cibles, ces
  * appels disparaissent (-flto les inline en rien) et le binaire ne paie
  * ni en RAM ni en flash pour le code LoRa.
  */

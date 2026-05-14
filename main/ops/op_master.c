@@ -6,9 +6,9 @@
  * Chaque op verifie `is_master` (device dans `s_currency.mint_authorities`)
  * et retourne `ESP_ERR_NOT_ALLOWED` sur non-maitre.
  *
- * Sur cibles sans LoRa (ESP32-S3), `transport_lora_send` est no-op : le
- * maitre ne peut pas emettre en LoRa, ce qui est le comportement attendu
- * (pas de Wio-E5 onboard).
+ * Sur d'eventuelles cibles sans Wio-E5, `transport_lora_send` est no-op
+ * (stub) : le maitre ne peut pas emettre en LoRa, ce qui est le
+ * comportement attendu. CYD et S3 Waveshare ont tous deux un Wio-E5.
  *
  * Compilent partout — pas de garde `#if CONFIG_IDF_TARGET_ESP32`.
  */

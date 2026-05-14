@@ -137,6 +137,26 @@ In-scope car ils deviendraient activement mensongers après le changement :
 Périmètre strictement limité aux commentaires rendus faux par ce
 changement — pas de refactor non lié.
 
+### 4.7 `components/debug_console/src/debug_console.c` (bug découvert au build)
+
+Le changement 4.4 (console sur USB-Serial-JTAG) active dans
+`console_io_init()` le bloc `#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG`,
+jusque-là jamais compilé sur le build S3 principal (console par défaut
+sur UART). Ce bloc contenait un bug latent : il était resté sur l'API
+dépréciée `esp_vfs_usb_serial_jtag_use_driver()` avec le header
+`esp_vfs_usb_serial_jtag.h` qui ne déclare pas cette fonction (le
+symbole déprécié vit dans `esp_vfs_dev.h`). La branche UART avait été
+migrée vers la nomenclature `*_vfs_*` d'IDF v5.x, mais pas la branche
+USB-Serial-JTAG.
+
+Correctif (miroir exact de la branche UART) :
+- include : `esp_vfs_usb_serial_jtag.h` → `driver/usb_serial_jtag_vfs.h`
+- appel : `esp_vfs_usb_serial_jtag_use_driver()` →
+  `usb_serial_jtag_vfs_use_driver()`
+
+In-scope : le changement 4.4 est nécessaire et correct ; il faut que le
+firmware S3 compile pour que le portage LoRa puisse être livré.
+
 ## 5. Flux d'exécution (inchangé, hérité du CYD)
 
 ```
@@ -166,15 +186,14 @@ Aucune nouvelle fonction C n'est créée — uniquement du gating de build et
 des constantes compile-time. Il n'y a donc pas de test unitaire à écrire ;
 la vérification est :
 
-1. **Build S3** : `idf.py set-target esp32s3 && idf.py build` → compile
-   sans erreur ni warning nouveau.
-2. **Non-régression CYD** : `idf.py set-target esp32 && idf.py build` →
-   compile sans erreur.
-3. **Build de test** : `idf.py -C test_app build` (cible esp32s3) → toujours
-   vert. `test_app` n'inclut pas le composant `main/`, mais inclut
-   `device_hal` — il compilera désormais aussi `hal_lora_wio_e5.c` aux
-   côtés du mock `hal_lora_mock.c` (pas de conflit de symbole : noms de
-   factory distincts).
+1. **Build S3** (`idf.py set-target esp32s3 && idf.py build`) → ✅ OK,
+   `offline-payment.bin` généré (33 % de flash libre).
+2. **Non-régression CYD** (`idf.py set-target esp32 && idf.py build`) →
+   ✅ OK, `offline-payment.bin` généré, 0 erreur.
+3. **Build de test** (`idf.py -C test_app build`) → ✅ OK,
+   `meshpay_test_app.bin` généré. `hal_lora_wio_e5.c` et `hal_lora_mock.c`
+   coexistent sans conflit de symbole (factory `hal_lora_wio_e5_create`
+   ≠ `hal_lora_mock_create`).
 4. **Smoke test matériel** (Wio-E5 câblé sur GPIO 43/44) : flasher le S3,
    vérifier dans le log série :
    - `Driver cree (UART1, TX=43, RX=44)`

@@ -42,8 +42,9 @@ void attempt_beneficiary_forward(void);
  * Operations maitre (signe + envoi LoRa). Compilent partout, runtime
  * check `is_master` retourne ESP_ERR_NOT_ALLOWED sur non-maitre.
  *
- * Sur cibles sans LoRa : transport_lora_send est no-op → le maitre
- * ne peut emettre, c'est le comportement attendu (pas de Wio-E5).
+ * Sur d'eventuelles cibles sans Wio-E5 : transport_lora_send est no-op
+ * (stub) → le maitre ne peut emettre, c'est le comportement attendu.
+ * CYD et S3 Waveshare ont tous deux un Wio-E5.
  * ---------------------------------------------------------------- */
 
 esp_err_t broadcast_text_send(const char *text, uint8_t text_len);

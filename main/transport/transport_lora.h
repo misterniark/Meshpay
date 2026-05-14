@@ -5,15 +5,15 @@
  * **Pourquoi cette couche ?**
  *
  * Avant le Lot D.3, les handlers et la core_task etaient parsemes de
- * `#ifdef MP_HAS_LORA ... s_lora_hal.send(...) ... #endif`. Sur ESP32-S3
- * (pas de Wio-E5 onboard), ces blocs etaient des trous beants dans la
- * logique.
+ * `#ifdef MP_HAS_LORA ... s_lora_hal.send(...) ... #endif`. Sur les
+ * cibles sans Wio-E5, ces blocs etaient des trous beants dans la logique.
  *
  * Cette facade fournit l'API LoRa **comme si LoRa etait toujours present** :
  * deux implementations alternatives, selectionnees par CMake :
  *
- *   - `transport_lora.c`      : impl reelle (compilee sur ESP32 CYD)
- *   - `transport_lora_stub.c` : no-op  (compilee sur ESP32-S3 et autres)
+ *   - `transport_lora.c`      : impl reelle (cibles avec Wio-E5 :
+ *                               ESP32 CYD + ESP32-S3 Waveshare)
+ *   - `transport_lora_stub.c` : no-op (eventuelles cibles sans Wio-E5)
  *
  * Le code applicatif n'a plus aucun `#ifdef` autour des appels LoRa.
  *
@@ -22,7 +22,7 @@
  * Les buffers (s_relay_bcast_buf, s_relay_ping_buf, s_pong_buf) sont
  * desormais internes a `transport_lora.c`. Les handlers leur passent une
  * copie via les fonctions `queue_*`. Sur le stub, ces fonctions sont
- * des no-ops — pas de buffer, pas de RAM gachee sur S3.
+ * des no-ops — pas de buffer, pas de RAM gachee sur les cibles sans LoRa.
  */
 
 #ifndef MESHPAY_TRANSPORT_LORA_H

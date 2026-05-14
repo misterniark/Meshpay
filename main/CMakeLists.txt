@@ -2,11 +2,11 @@
 # Orchestration du système de paiement décentralisé offline
 #
 # ESP32  (CYD)       : core_task + espnow_task + lora_task (noeud complet)
-# ESP32-S3 (Waveshare) : core_task + espnow_task (pas de LoRa onboard)
+# ESP32-S3 (Waveshare) : core_task + espnow_task + lora_task (noeud complet,
+#                        Wio-E5 cable sur UART1 / GPIO 43-44)
 #
 # Note : espnow et lora_sync sont toujours dans REQUIRES car le checker
 # de dépendances ESP-IDF scanne les #include sans évaluer les #if.
-# Ces composants sont compilés mais non utilisés sur ESP32-S3.
 
 set(meshpay_main_srcs
     "main.c"
@@ -55,10 +55,11 @@ else()
     list(APPEND meshpay_main_srcs "app_init/nvs_init_plain.c")
 endif()
 
-# Lot D.3 : facade LoRa. Sur ESP32 (CYD) : impl reelle. Sur autres
-# cibles (ESP32-S3, etc.) : stub no-op. Le code applicatif n'a plus
-# aucun `#ifdef MP_HAS_LORA` autour des appels.
-if(CONFIG_IDF_TARGET_ESP32)
+# Lot D.3 : facade LoRa. Sur les cibles equipees d'un Wio-E5 (ESP32 CYD
+# et ESP32-S3 Waveshare) : impl reelle. Sur d'eventuelles autres cibles :
+# stub no-op. Le code applicatif n'a plus aucun `#ifdef MP_HAS_LORA`
+# autour des appels.
+if(CONFIG_IDF_TARGET_ESP32 OR CONFIG_IDF_TARGET_ESP32S3)
     list(APPEND meshpay_main_srcs "transport/transport_lora.c")
 else()
     list(APPEND meshpay_main_srcs "transport/transport_lora_stub.c")

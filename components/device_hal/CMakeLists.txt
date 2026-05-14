@@ -2,7 +2,7 @@
 # Couche d'abstraction matérielle : interfaces portables + implémentations par target
 #
 # ESP32  (CYD)       : ILI9341 display, Wio-E5 LoRa, NVS storage
-# ESP32-S3 (Waveshare) : JD9853 display, NVS storage (client-only, pas de LoRa)
+# ESP32-S3 (Waveshare) : JD9853 display, Wio-E5 LoRa, NVS storage
 
 set(HAL_SRCS "")
 set(HAL_PRIV_INCLUDE "")
@@ -16,9 +16,12 @@ if(CONFIG_IDF_TARGET_ESP32)
     )
     list(APPEND HAL_PRIV_INCLUDE "src/esp32")
 elseif(CONFIG_IDF_TARGET_ESP32S3)
-    # Waveshare 1.47" : display JD9853 + storage NVS (pas de LoRa)
+    # Waveshare 1.47" : display JD9853 + LoRa Wio-E5 + storage NVS.
+    # hal_lora_wio_e5.c est target-agnostic (UART/AT standard) : on
+    # reutilise le fichier de src/esp32/ partage avec le CYD.
     list(APPEND HAL_SRCS
         "src/esp32/hal_storage_esp32.c"
+        "src/esp32/hal_lora_wio_e5.c"
         "src/esp32s3/hal_display_jd9853.c"
     )
     list(APPEND HAL_PRIV_INCLUDE "src/esp32s3" "src/esp32")
