@@ -67,3 +67,30 @@ TEST_CASE("power_usb_never_enters_eco", "[power_manager]")
     TEST_ASSERT_EQUAL(0, s_backlight_calls);
     TEST_ASSERT_EQUAL(0, s_pm_calls);
 }
+
+TEST_CASE("power_battery_enters_eco_after_timeout", "[power_manager]")
+{
+    setup(POWER_SOURCE_BATTERY);
+
+    /* 4 s d'inactivite : pas encore le timeout (5 s). */
+    s_fake_now_ms += 4000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(POWER_STATE_ACTIF, power_manager_get_state());
+
+    /* 2 s de plus => 6 s >= 5 s => passage en ECO. */
+    s_fake_now_ms += 2000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(POWER_STATE_ECO, power_manager_get_state());
+
+    /* Effets de bord du passage en ECO. */
+    TEST_ASSERT_EQUAL(0, s_last_backlight);
+    TEST_ASSERT_EQUAL(POWER_STATE_ECO, s_last_pm_state);
+    TEST_ASSERT_EQUAL(1, s_backlight_calls);
+    TEST_ASSERT_EQUAL(1, s_pm_calls);
+
+    /* Idempotence : un tick supplementaire ne re-declenche rien. */
+    s_fake_now_ms += 1000;
+    power_manager_tick();
+    TEST_ASSERT_EQUAL(1, s_backlight_calls);
+    TEST_ASSERT_EQUAL(1, s_pm_calls);
+}
