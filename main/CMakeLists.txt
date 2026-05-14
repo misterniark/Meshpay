@@ -64,6 +64,14 @@ else()
     list(APPEND meshpay_main_srcs "transport/transport_lora_stub.c")
 endif()
 
+# Gestion de l'energie (feature 13) : impl reelle sur ESP32-S3, stub
+# no-op sur le CYD (ESP32). Le CYD reste toujours pleinement reactif.
+if(CONFIG_IDF_TARGET_ESP32S3)
+    list(APPEND meshpay_main_srcs "power_manager.c")
+else()
+    list(APPEND meshpay_main_srcs "power_manager_stub.c")
+endif()
+
 idf_component_register(
     SRCS ${meshpay_main_srcs}
     INCLUDE_DIRS "."
