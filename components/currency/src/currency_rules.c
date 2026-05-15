@@ -15,6 +15,21 @@
 #include "currency/currency_rules.h"
 #include <string.h>
 
+#include "sdkconfig.h"
+
+#if CONFIG_MESHPAY_TEST_SKIP_MINT_AUTHORITY
+#include "esp_log.h"
+/*
+ * Garde-fou Release : empeche toute production binaire avec le bypass
+ * actif. Si quelqu'un oublie de desactiver l'option avant de passer
+ * en mode RELEASE, le build echoue ici, pas en prod.
+ */
+#if CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE
+#error "MESHPAY_TEST_SKIP_MINT_AUTHORITY interdit en mode RELEASE — desactiver dans menuconfig."
+#endif
+static const char *TAG_TEST_AUTH = "currency_test";
+#endif
+
 /* ================================================================
  * Vérifications individuelles
  * ================================================================ */
@@ -126,6 +141,19 @@ currency_err_t currency_check_mint_authority(const currency_config_t *config,
 {
     if (!config || !signer_key) return CURRENCY_ERR_NULL_PARAM;
 
+#if CONFIG_MESHPAY_TEST_SKIP_MINT_AUTHORITY
+    /*
+     * TEST MODE : on accepte n'importe quelle cle signataire pour
+     * permettre la propagation des MINT entre devices sur table.
+     * Un WARN est emis a CHAQUE appel pour rester visible dans les
+     * logs si l'option reste active par erreur.
+     */
+    ESP_LOGW(TAG_TEST_AUTH,
+             "MINT AUTH BYPASSED — TEST MODE (currency_id=0x%08lx)",
+             (unsigned long)config->currency_id);
+    (void)signer_key;
+    return CURRENCY_OK;
+#else
     /* Chercher la clé dans la liste des autorités */
     for (uint8_t i = 0; i < config->mint_authority_count; i++) {
         if (public_key_equal(&config->mint_authorities[i], signer_key)) {
@@ -134,6 +162,7 @@ currency_err_t currency_check_mint_authority(const currency_config_t *config,
     }
 
     return CURRENCY_ERR_NOT_AUTHORITY;
+#endif
 }
 
 currency_err_t currency_check_cooldown(const currency_config_t *config,

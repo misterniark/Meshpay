@@ -1,0 +1,28 @@
+# Kconfig du composant currency (Mesh Pay)
+#
+# Options de TEST exclusivement. Toute option declaree ici doit etre
+# protegee par un garde-fou Release qui empeche son activation dans
+# un binaire de production (cf. #error dans currency_rules.c).
+
+menu "Mesh Pay currency (TEST options)"
+
+    config MESHPAY_TEST_SKIP_MINT_AUTHORITY
+        bool "TEST ONLY: bypass mint authority verification"
+        default n
+        help
+            DANGER : si actif, currency_check_mint_authority() retourne
+            CURRENCY_OK pour toute cle signataire, et un ESP_LOGW est
+            emis a chaque appel ("MINT AUTH BYPASSED — TEST MODE").
+
+            Permet de tester la propagation des MINT entre devices
+            sur table sans avoir a partager une mint authority commune
+            entre les firmwares.
+
+            Garde-fou : un #error dans currency_rules.c empeche la
+            compilation si cette option est activee en mode
+            SECURE_FLASH_ENCRYPTION_MODE_RELEASE. Impossible donc de
+            produire un binaire de production avec ce bypass actif.
+
+            A laisser systematiquement OFF en production.
+
+endmenu
