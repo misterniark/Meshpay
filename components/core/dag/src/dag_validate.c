@@ -12,7 +12,19 @@
 #include "dag/dag.h"
 #include <string.h>
 
-esp_err_t dag_validate_transaction(const dag_t *dag, const transaction_t *tx)
+/*
+ * [F-DG-007] Implémentation interne unifiée des deux variantes
+ * dag_validate_transaction (strict) et dag_validate_transaction_ext
+ * (tolérant aux parents pré-checkpoint).
+ *
+ * Si `checkpoint_timestamp == 0`, on est en mode strict : tout parent
+ * absent du DAG → ESP_ERR_NOT_FOUND. Sinon, un parent absent du DAG
+ * est toléré : on présume qu'il a été consolidé dans le checkpoint
+ * et purgé. Justification détaillée dans dag_validate.h.
+ */
+static esp_err_t dag_validate_transaction_impl(const dag_t *dag,
+                                                const transaction_t *tx,
+                                                uint64_t checkpoint_timestamp)
 {
     if (dag == NULL || tx == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -23,12 +35,32 @@ esp_err_t dag_validate_transaction(const dag_t *dag, const transaction_t *tx)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* 2. Vérifier que tous les parents existent dans le DAG */
+    /*
+     * 2. Vérifier que tous les parents existent dans le DAG.
+     *
+     * [F-DG-007] Si checkpoint_timestamp > 0, on tolère qu'un parent
+     * soit absent du DAG : il est alors présumé avoir été consolidé
+     * dans le checkpoint et purgé par dag_prune_before. Cette tolérance
+     * est nécessaire après un prune (sliding window) car les TX
+     * conservées peuvent légitimement référencer des parents anciens.
+     *
+     * Sécurité : pour les TX locales (chemin d'insertion via
+     * dag_insert_and_track), les parents viennent toujours de
+     * dag_get_tips qui ne retourne que des TX présentes — un attaquant
+     * ne peut donc pas forger un parent "fictif" en exploitant cette
+     * tolérance. Pour les TX reçues via merge, dag_merge n'appelle pas
+     * du tout dag_validate_transaction* (le rempart est la validation
+     * crypto + conflit seq dans dag_merge_transaction).
+     */
     for (uint8_t i = 0; i < tx->parent_count; i++) {
         if (hash_is_zero(&tx->parents[i])) {
             continue;  /* Parent non utilisé */
         }
         if (!dag_contains(dag, &tx->parents[i])) {
+            if (checkpoint_timestamp > 0) {
+                /* Mode tolérant : on présume parent pré-checkpoint. */
+                continue;
+            }
             return ESP_ERR_NOT_FOUND;
         }
     }
@@ -75,4 +107,18 @@ esp_err_t dag_validate_transaction(const dag_t *dag, const transaction_t *tx)
     }
 
     return ESP_OK;
+}
+
+esp_err_t dag_validate_transaction(const dag_t *dag, const transaction_t *tx)
+{
+    /* Mode strict : checkpoint_timestamp == 0 → exige tous les parents
+     * présents dans le DAG. */
+    return dag_validate_transaction_impl(dag, tx, 0);
+}
+
+esp_err_t dag_validate_transaction_ext(const dag_t *dag,
+                                       const transaction_t *tx,
+                                       uint64_t checkpoint_timestamp)
+{
+    return dag_validate_transaction_impl(dag, tx, checkpoint_timestamp);
 }

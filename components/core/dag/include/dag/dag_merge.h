@@ -60,12 +60,38 @@ esp_err_t dag_merge_transaction(dag_t *dag, const transaction_t *tx,
  * Insère chaque transaction du tableau, dans l'ordre. Les doublons
  * sont ignorés silencieusement.
  *
+ * [F-DG-009] CETTE FONCTION EST DÉLIBÉRÉMENT NON-ATOMIQUE.
+ *
+ * Si une transaction du lot échoue (signature invalide, conflit de
+ * seq, DAG plein), les transactions précédentes du lot ont déjà été
+ * insérées dans le DAG et ne sont PAS retirées. C'est cohérent avec
+ * le modèle de convergence éventuelle du ledger : un fragment de
+ * synchronisation partiellement appliqué reste valide, les TX
+ * manquantes arriveront lors d'une synchronisation ultérieure.
+ *
+ * Conséquences pour l'appelant :
+ *   - `*inserted_count` reflète exactement le nombre de TX insérées.
+ *   - Sur retour `ESP_ERR_NO_MEM` : la 1ère TX qui n'a pas tenu est
+ *     `transactions[*inserted_count]` ; les suivantes n'ont pas été
+ *     tentées. Les `*inserted_count` premières sont en place.
+ *   - Sur retour `ESP_OK` : chaque TX a été tentée individuellement.
+ *     Certaines peuvent avoir été rejetées (signature, seq, etc.) ;
+ *     `inserted_count < count` signale ce cas. Les logs `ESP_LOGW`
+ *     dans dag_merge.c précisent la raison de chaque rejet.
+ *
+ * Aucun rollback n'est implémenté. Si une atomicité forte est requise
+ * (par exemple pour une consensus engine externe), il faut soit
+ * pré-valider tout le lot avant d'appeler cette fonction, soit
+ * encapsuler dans une couche d'ordonnancement applicatif.
+ *
  * @param[in,out] dag             DAG local
  * @param[in]     transactions    Tableau de transactions distantes
  * @param[in]     count           Nombre de transactions dans le tableau
  * @param[in]     master_keys     Liste des clés maîtres autorisées pour les MINT
  * @param[out]    inserted_count  Nombre de transactions effectivement insérées
- * @return ESP_OK si toutes les transactions ont été traitées
+ * @return ESP_OK si toutes les transactions ont été traitées (qu'elles
+ *                soient insérées, dédoublonnées ou rejetées
+ *                individuellement)
  *         ESP_ERR_NO_MEM si le DAG est devenu plein avant la fin
  */
 esp_err_t dag_merge_batch(dag_t *dag, const transaction_t *transactions,

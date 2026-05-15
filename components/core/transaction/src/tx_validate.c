@@ -82,6 +82,31 @@ esp_err_t tx_validate_structure(const transaction_t *tx)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /*
+     * [F-DG-020] TX TRANSFER : interdire from == to (self-loop).
+     *
+     * Décision produit : un device ne doit pas pouvoir s'envoyer un
+     * paiement à lui-même. Sans cette garde, l'utilisateur pouvait
+     * configurer accidentellement son propre alias comme bénéficiaire
+     * dans op_beneficiary_forward, ou saisir sa propre clé comme
+     * destinataire dans l'écran Payer — résultat : perte nette de
+     * `fee` à chaque TX confirmée, sans gain comptable réel.
+     *
+     * Pour les MINT, from == to est autorisé : le maître peut
+     * légitimement créer de la monnaie à son propre nom (genesis MINT
+     * d'auto-attribution). Donc la garde s'applique uniquement aux
+     * TRANSFER.
+     *
+     * Conséquence côté UI : l'écran "Payer" doit déjà filtrer la
+     * pubkey du device propriétaire dans la liste des destinataires,
+     * et l'écran de configuration bénéficiaire doit interdire la
+     * propre clé. Ce check est le dernier filet de sécurité.
+     */
+    if (tx->type == TX_TYPE_TRANSFER &&
+        memcmp(tx->from.bytes, tx->to.bytes, CRYPTO_PUBLIC_KEY_SIZE) == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     return ESP_OK;
 }
 

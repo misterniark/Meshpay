@@ -90,8 +90,9 @@ const transaction_t *dag_get_by_id(const dag_t *dag, const hash_t *id)
     return found;
 }
 
-esp_err_t dag_get_tips(const dag_t *dag, const transaction_t **tips,
-                       uint32_t max_tips, uint32_t *tip_count)
+esp_err_t dag_get_tips_ext(const dag_t *dag, const transaction_t **tips,
+                            uint32_t max_tips, uint32_t *tip_count,
+                            uint32_t *total_tips_found)
 {
     if (dag == NULL || tips == NULL || tip_count == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -100,15 +101,25 @@ esp_err_t dag_get_tips(const dag_t *dag, const transaction_t **tips,
     xSemaphoreTakeRecursive(dag->mutex, portMAX_DELAY);
 
     *tip_count = 0;
+    uint32_t total = 0;
 
     /*
      * Une transaction est un "tip" si aucune autre transaction dans le DAG
      * ne la référence comme parent.
      *
-     * Algorithme O(n²) : pour chaque TX, vérifier si elle apparaît comme
-     * parent dans une autre TX. Acceptable pour n=500.
+     * Algorithme O(n²) sur la détection ; insertion-sort en O(max_tips)
+     * par tip trouvé pour maintenir l'ordre "plus récent en tête".
+     *
+     * [F-DG-018] Sélection par timestamp décroissant : on parcourt
+     * toutes les TX, on identifie celles qui sont des tips, et on
+     * maintient dans `tips[]` les `max_tips` plus récents (insertion
+     * triée). Total de tips réels conservé dans `total` pour
+     * exposition via total_tips_found.
+     *
+     * Coût total : O(n² + n × max_tips). Pour n=250 et max_tips=2,
+     * c'est ~62 750 comparaisons, négligeable (< 1 ms sur ESP32).
      */
-    for (uint32_t i = 0; i < dag->count && *tip_count < max_tips; i++) {
+    for (uint32_t i = 0; i < dag->count; i++) {
         bool is_tip = true;
         const hash_t *candidate_id = &dag->transactions[i].id;
 
@@ -125,14 +136,57 @@ esp_err_t dag_get_tips(const dag_t *dag, const transaction_t **tips,
             if (!is_tip) break;
         }
 
-        if (is_tip) {
-            tips[*tip_count] = &dag->transactions[i];
+        if (!is_tip) continue;
+
+        total++;
+
+        const transaction_t *candidate = &dag->transactions[i];
+
+        if (*tip_count < max_tips) {
+            /*
+             * Le buffer de sortie n'est pas plein : insérer le candidat
+             * à la bonne position (tri décroissant par timestamp).
+             */
+            uint32_t pos = *tip_count;
+            while (pos > 0 &&
+                   tips[pos - 1]->timestamp < candidate->timestamp) {
+                tips[pos] = tips[pos - 1];
+                pos--;
+            }
+            tips[pos] = candidate;
             (*tip_count)++;
+        } else if (max_tips > 0 &&
+                   tips[max_tips - 1]->timestamp < candidate->timestamp) {
+            /*
+             * Le buffer est plein, mais le candidat est plus récent que
+             * le moins récent du buffer : on évince le dernier et on
+             * insère le candidat à la bonne position.
+             */
+            uint32_t pos = max_tips - 1;
+            while (pos > 0 &&
+                   tips[pos - 1]->timestamp < candidate->timestamp) {
+                tips[pos] = tips[pos - 1];
+                pos--;
+            }
+            tips[pos] = candidate;
         }
+        /* Sinon : candidat plus ancien que tous les tips déjà retenus, on
+         * l'ignore. Il est néanmoins compté dans `total`. */
+    }
+
+    if (total_tips_found != NULL) {
+        *total_tips_found = total;
     }
 
     xSemaphoreGiveRecursive(dag->mutex);
     return ESP_OK;
+}
+
+esp_err_t dag_get_tips(const dag_t *dag, const transaction_t **tips,
+                       uint32_t max_tips, uint32_t *tip_count)
+{
+    /* Délègue à _ext en ignorant le total des tips trouvés. */
+    return dag_get_tips_ext(dag, tips, max_tips, tip_count, NULL);
 }
 
 uint32_t dag_count(const dag_t *dag)

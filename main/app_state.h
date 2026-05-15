@@ -114,6 +114,14 @@
 #define NVS_KEY_FWD_INTERVAL  "fwd_intv"
 /* [I3-fix] Nonce monotone de ce device (incremente a chaque TX emise). */
 #define NVS_KEY_NEXT_SEQ      "next_seq"
+/*
+ * [F-DG-011] Sauvegarde du max(seq) du propriétaire au moment de
+ * chaque checkpoint. Sert de filet de récupération si NVS_KEY_NEXT_SEQ
+ * est corrompu/effacé ET que le DAG est vide (post-prune complet).
+ * Sans cette clé, le device repartait à seq=0 et était banni par les
+ * peers qui avaient encore l'historique en mémoire.
+ */
+#define NVS_KEY_OWN_MAX_SEQ   "own_max_seq"
 
 /** Intervalle de verification des expirations de locks (ms). */
 #define LOCK_EXPIRE_INTERVAL_MS   5000

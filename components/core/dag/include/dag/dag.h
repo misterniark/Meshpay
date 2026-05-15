@@ -117,14 +117,42 @@ const transaction_t *dag_get_by_id(const dag_t *dag, const hash_t *id);
  * référence comme parent. Ce sont les candidats naturels pour devenir
  * parents de la prochaine transaction.
  *
+ * [F-DG-018] Les tips retournés sont les **plus récents par timestamp**
+ * (ordre décroissant). Si le DAG contient plus de tips que `max_tips`,
+ * les plus anciens sont silencieusement écartés. Utiliser
+ * dag_get_tips_ext pour récupérer aussi le nombre total de tips
+ * trouvés et détecter une fragmentation excessive du DAG.
+ *
  * @param[in]  dag       DAG source
- * @param[out] tips      Tableau de pointeurs vers les tips
+ * @param[out] tips      Tableau de pointeurs vers les tips (triés timestamp décroissant)
  * @param[in]  max_tips  Taille max du tableau de sortie
- * @param[out] tip_count Nombre de tips trouvées
+ * @param[out] tip_count Nombre de tips retournés (≤ max_tips)
  * @return ESP_OK en cas de succès
  */
 esp_err_t dag_get_tips(const dag_t *dag, const transaction_t **tips,
                        uint32_t max_tips, uint32_t *tip_count);
+
+/**
+ * [F-DG-018] Variante de dag_get_tips exposant le nombre total de
+ * tips trouvés dans le DAG, indépendamment de la troncature à
+ * `max_tips`.
+ *
+ * Permet à l'appelant de détecter une fragmentation excessive du DAG
+ * (`total_tips_found >> max_tips`) qui dégrade la convergence : les
+ * nouvelles TX convergent toujours vers les mêmes max_tips récents,
+ * laissant les anciens tips orphelins indéfiniment.
+ *
+ * @param[in]  dag                DAG source
+ * @param[out] tips               Tableau de pointeurs vers les tips
+ * @param[in]  max_tips           Taille max du tableau de sortie
+ * @param[out] tip_count          Nombre de tips retournés (≤ max_tips)
+ * @param[out] total_tips_found   [optionnel, peut être NULL] nombre total
+ *                                 de tips dans le DAG (peut dépasser max_tips)
+ * @return ESP_OK en cas de succès
+ */
+esp_err_t dag_get_tips_ext(const dag_t *dag, const transaction_t **tips,
+                           uint32_t max_tips, uint32_t *tip_count,
+                           uint32_t *total_tips_found);
 
 /**
  * @brief Retourne le nombre de transactions dans le DAG.

@@ -15,6 +15,7 @@
 #include "dag/dag.h"
 #include "dag/dag_prune.h"
 #include "dag/dag_validate.h"
+#include "persistence/nvs_next_seq.h"
 #include "time_glue.h"
 #include "wallet/wallet_checkpoint.h"
 
@@ -66,6 +67,15 @@ void auto_checkpoint_if_needed(void)
     }
 
     /*
+     * [F-DG-011] Sauvegarder le max_seq du propriétaire en NVS dédiée.
+     * Cette clé est consultée au boot si NVS_KEY_NEXT_SEQ est perdu ET
+     * que le DAG est vide (post-prune). Sans cette persistance, le
+     * device repartait de seq=0 après corruption NVS+prune complet et
+     * était banni par les peers sur conflit de seq.
+     */
+    nvs_persist_own_max_seq();
+
+    /*
      * Elaguer le DAG : sans cet elagage, le DAG se remplit jusqu'a
      * DAG_MAX_TRANSACTIONS et bloque toute nouvelle insertion.
      *
@@ -95,27 +105,33 @@ esp_err_t dag_insert_and_track(const transaction_t *tx)
     /*
      * [F-DG-001] Validation contextuelle AVANT insertion.
      *
-     * dag_validate_transaction vérifie que :
+     * dag_validate_transaction_ext vérifie que :
      *  1. la TX n'existe pas déjà (anti-double-insert),
-     *  2. tous les parents référencés sont présents dans le DAG,
-     *  3. la TX ne se référence pas elle-même comme parent (anti-cycle).
+     *  2. tous les parents référencés sont présents dans le DAG
+     *     OU antérieurs au checkpoint (F-DG-007 : tolérance prune),
+     *  3. les parents ne sont pas dupliqués (F-DG-019),
+     *  4. la TX ne se référence pas elle-même comme parent (anti-cycle).
      *
-     * Avant ce fix, cette fonction était écrite mais JAMAIS appelée en
-     * production (seul test_dag.c l'invoquait). Le chemin local
-     * (initiate_payment, initiate_mint, attempt_beneficiary_forward)
+     * Avant ce fix (F-DG-001), cette fonction était écrite mais JAMAIS
+     * appelée en production (seul test_dag.c l'invoquait). Le chemin
+     * local (initiate_payment, initiate_mint, attempt_beneficiary_forward)
      * s'appuyait uniquement sur dag_insert qui ne vérifie ni l'existence
-     * des parents ni l'absence de cycle. Le risque pratique était
-     * faible parce que les parents viennent de dag_get_tips, mais
-     * aucun filet n'existait en cas de bug de sélection des tips ou
-     * d'appel direct à dag_insert depuis du code futur.
+     * des parents ni l'absence de cycle.
+     *
+     * [F-DG-007] On passe s_checkpoint.timestamp en argument pour
+     * tolérer les parents pré-checkpoint (TX conservées qui référencent
+     * un parent ancien purgé après prune). Si le checkpoint n'a pas
+     * encore été créé (s_checkpoint.timestamp == 0), le comportement
+     * reste strict.
      *
      * On retourne ESP_ERR_INVALID_ARG pour une TX malformée
-     * (parent inconnu, self-loop) — cohérent avec le code de retour
-     * que dag_insert utilise pour ses propres rejets.
+     * (parent inconnu, self-loop, parents dupliqués) — cohérent avec
+     * le code de retour que dag_insert utilise pour ses propres rejets.
      */
-    esp_err_t ret = dag_validate_transaction(&s_dag, tx);
+    esp_err_t ret = dag_validate_transaction_ext(&s_dag, tx,
+                                                  s_checkpoint.timestamp);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "TX rejetee par dag_validate_transaction: 0x%x", ret);
+        ESP_LOGW(TAG, "TX rejetee par dag_validate_transaction_ext: 0x%x", ret);
         return ret;
     }
 
