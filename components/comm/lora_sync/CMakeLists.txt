@@ -17,9 +17,14 @@ idf_build_get_property(project_name PROJECT_NAME)
 if(project_name STREQUAL "meshpay_test_app")
     list(APPEND lora_sync_srcs "test/test_lora_frag.c")
     list(APPEND lora_sync_srcs "test/test_lora_tx_packetize.c")
+    list(APPEND lora_sync_srcs "test/test_lora_sync_jitter.c")
     idf_component_register(
         SRCS ${lora_sync_srcs}
         INCLUDE_DIRS "include"
+        # `src` reste prive : permet a lora_sync.c et aux tests d'inclure
+        # le header local lora_sync_jitter.h sans l'exposer aux autres
+        # composants.
+        PRIV_INCLUDE_DIRS "src"
         REQUIRES comm_protocol transaction device_hal
         PRIV_REQUIRES unity
         WHOLE_ARCHIVE
@@ -30,6 +35,7 @@ else()
     idf_component_register(
         SRCS ${lora_sync_srcs}
         INCLUDE_DIRS "include"
+        PRIV_INCLUDE_DIRS "src"
         REQUIRES comm_protocol transaction device_hal
     )
 endif()

@@ -2,13 +2,21 @@
  * @file lora_sync.c
  * @brief Synchronisation LoRa périodique — broadcast et réception.
  *
- * Cycle de sync (toutes les 2 minutes) :
+ * Cycle de sync (~2 minutes, avec jitter) :
+ * 0. Au boot, attendre un délai aléatoire dans [0, interval] avant
+ *    le 1er cycle (jitter de boot, cf. lora_sync_jitter.h).
  * 1. Acquérir le mutex du DAG
  * 2. Parcourir le DAG pour trouver les TX CONFIRMED récentes
  *    (timestamp > dernier_sync)
  * 3. Relâcher le mutex
  * 4. Sérialiser et envoyer chaque TX via LoRa
  * 5. Retourner en mode réception
+ * 6. Dormir un délai aléatoire dans [interval ± 25 %] (jitter par
+ *    cycle) avant le prochain.
+ *
+ * Le double jitter (boot + cycle) décorrèle les émissions de devices
+ * co-bootés : sans ça, ils émettent au même tick → collision LoRa →
+ * aucun ne reçoit l'autre → DAG ne se propage pas.
  *
  * Réception :
  * - LORA_TX (0x10) : désérialiser → événement LORA_TX_RECEIVED
@@ -22,10 +30,21 @@
 #include "crypto/crypto_sign.h"
 #include "transaction/tx_serialize.h"
 #include "transaction/tx_validate.h"
+#include "lora_sync_jitter.h"  /* helpers PURS de jitter (header privé) */
 #include "esp_log.h"
+#include "esp_random.h"        /* esp_random() : source d'aléa hardware */
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include <string.h>
+
+/**
+ * Pourcentage de variation aléatoire appliqué à chaque cycle de sync :
+ * le délai effectif est tiré dans [interval - 25%, interval + 25%].
+ * Permet de décorréler les cycles de deux devices bootés simultanément
+ * (collision LoRa systématique sinon : tous deux émettent au même tick,
+ * aucun ne reçoit l'autre, le DAG ne se propage pas).
+ */
+#define LORA_SYNC_JITTER_PCT 25U
 
 static const char *TAG = "lora_sync";
 
@@ -694,20 +713,45 @@ void lora_sync_task(void *param)
     config->lora->set_rx_callback(lora_rx_callback, (void *)config,
                                    config->lora->ctx);
     config->lora->start_rx(config->lora->ctx);
-    ESP_LOGI(TAG, "Tâche LoRa sync démarrée (intervalle=%lums)",
-             (unsigned long)config->sync_interval_ms);
+
+    /*
+     * Jitter de boot : décale le tout premier cycle d'un délai aléatoire
+     * dans [0, sync_interval_ms]. Sans ça, deux devices bootés en
+     * quasi-simultané (USB hub) entreraient en cycle au même tick →
+     * collision LoRa systématique (cf. lora_sync_jitter.h).
+     */
+    uint32_t boot_delay_ms =
+        lora_jitter_initial_ms(config->sync_interval_ms, esp_random());
+    ESP_LOGI(TAG,
+             "Tâche LoRa sync démarrée (intervalle=%lums, "
+             "boot jitter=%lums, jitter cycle=±%u%%)",
+             (unsigned long)config->sync_interval_ms,
+             (unsigned long)boot_delay_ms,
+             (unsigned)LORA_SYNC_JITTER_PCT);
 
     uint64_t last_sync_ts = 0;
 
+    /* Délai initial AVANT le premier cycle (jitter de boot). */
+    vTaskDelay(pdMS_TO_TICKS(boot_delay_ms));
+
     /* Boucle principale */
     for (;;) {
-        /* Dormir jusqu'au prochain cycle de sync */
-        vTaskDelay(pdMS_TO_TICKS(config->sync_interval_ms));
-
         /* Effectuer un cycle de synchronisation */
         lora_sync_do_cycle(config, &last_sync_ts);
 
         /* Retourner en mode réception */
         config->lora->start_rx(config->lora->ctx);
+
+        /*
+         * Dormir jusqu'au prochain cycle. Délai aléatoire dans
+         * [interval - 25%, interval + 25%] pour maintenir la
+         * décorrélation au fil des cycles (deux devices qui auraient
+         * fini par re-converger se redécalent).
+         */
+        uint32_t next_delay_ms =
+            lora_jitter_around_ms(config->sync_interval_ms,
+                                   LORA_SYNC_JITTER_PCT,
+                                   esp_random());
+        vTaskDelay(pdMS_TO_TICKS(next_delay_ms));
     }
 }

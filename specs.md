@@ -131,10 +131,17 @@ Device A (payeur)                    Device B (receveur)
 
 ### 4.4 Synchronisation LoRa
 
-- Chaque device diffuse **toutes les 2 minutes** ses transactions `CONFIRMED` récentes
+- Chaque device diffuse ses transactions `CONFIRMED` récentes **toutes les ~2 minutes ± 25 % (jitter, cf. anti-collision)**
 - Les devices récepteurs **valident** via `dag_merge_transaction()` (structure + signature + autorité MINT) puis fusionnent le sous-graphe reçu dans leur DAG local
 - La validation currency (`currency_validate()`) est effectuée **avant** le merge pour vérifier les règles métier (plafond, expiration, montants)
 - Résolution de conflits : si deux TX conflictuelles apparaissent, la TX `CONFIRMED` la plus ancienne prévaut
+
+**Anti-collision — jitter aléatoire (boot + cycle) :**
+- **Problème observé** : sans jitter, deux devices bootés en quasi-simultané (USB hub, mise sous tension groupée) entraient en cycle de sync au même tick → émission LoRa simultanée → ni l'un ni l'autre ne reçoit l'autre (SX1262 sourd pendant son propre TX) → le DAG ne se propage jamais entre eux.
+- **Jitter de boot** : avant le tout premier cycle, chaque device dort un délai aléatoire uniformément distribué dans `[0, sync_interval_ms]`. Décorrèle l'instant du premier broadcast entre devices co-bootés.
+- **Jitter par cycle** : à chaque itération, le délai est tiré dans `[interval − 25 %, interval + 25 %]`. Maintient la décorrélation au fil des cycles ; deux devices qui auraient fini par re-converger se redécalent.
+- Calcul implémenté dans les helpers PURS `lora_jitter_initial_ms()` / `lora_jitter_around_ms()` (header privé `components/comm/lora_sync/src/lora_sync_jitter.h`), couverts par 11 tests unitaires (`test/test_lora_sync_jitter.c`).
+- L'aléa est fourni par `esp_random()` à l'appel ; les helpers eux-mêmes n'invoquent aucune API ESP-IDF (testables sans mock).
 
 **Stratégie de fragmentation hybride :**
 - **Mode normal** : 1 TX confirmée par paquet LoRa (toujours < 255 octets)
