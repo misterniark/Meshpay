@@ -2,7 +2,11 @@
  * @file dag.c
  * @brief Implémentation du DAG (structure de base, insertion, recherche, tips).
  *
- * Le DAG est stocké dans un tableau statique de taille fixe (500 TX).
+ * Le DAG est stocké dans un tableau statique de taille fixe
+ * DAG_MAX_TRANSACTIONS (250 TX, voir dag.h pour la justification
+ * mémoire). [F-DG-012] La valeur "500" qui apparaissait dans ce
+ * commentaire avant 2026-05-15 était périmée.
+ *
  * La recherche par hash est linéaire O(n), acceptable pour cette taille.
  *
  * Les "tips" sont calculées dynamiquement : on parcourt toutes les TX
@@ -157,6 +161,43 @@ esp_err_t dag_set_status(dag_t *dag, const hash_t *id, tx_status_t status)
     /* Recherche linéaire — même logique que dag_get_by_id mais mutable */
     for (uint32_t i = 0; i < dag->count; i++) {
         if (hash_equal(&dag->transactions[i].id, id)) {
+            tx_status_t current = dag->transactions[i].status;
+
+            /*
+             * [F-DG-017] Valider la transition. Le cycle de vie attendu
+             * d'une TX est :
+             *
+             *   (creation) → LOCKED ── set_status ──> CONFIRMED  (terminal)
+             *                  └─── set_status ──> CANCELLED (terminal)
+             *   (creation) → CONFIRMED  (TX recue deja confirmee)
+             *
+             * Transitions interdites :
+             *   - CONFIRMED → quoi que ce soit (etat terminal)
+             *   - CANCELLED → quoi que ce soit (etat terminal)
+             *   - LOCKED    → LOCKED (no-op suspect)
+             *
+             * Idempotence : on accepte same-status uniquement si le
+             * statut courant est deja CONFIRMED ou CANCELLED (les
+             * appelants peuvent rejouer une confirmation sans bug).
+             * Pour LOCKED→LOCKED, on renvoie ESP_OK silencieux pour
+             * eviter de casser les flux qui posent le statut sur une
+             * TX qu'ils viennent de creer.
+             */
+            if (current == status) {
+                xSemaphoreGiveRecursive(dag->mutex);
+                return ESP_OK; /* idempotent */
+            }
+
+            bool allowed =
+                (current == TX_STATUS_LOCKED &&
+                 (status == TX_STATUS_CONFIRMED ||
+                  status == TX_STATUS_CANCELLED));
+
+            if (!allowed) {
+                xSemaphoreGiveRecursive(dag->mutex);
+                return ESP_ERR_INVALID_STATE;
+            }
+
             dag->transactions[i].status = status;
             xSemaphoreGiveRecursive(dag->mutex);
             return ESP_OK;

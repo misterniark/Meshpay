@@ -14,6 +14,7 @@
 #include "currency/currency_melt.h"
 #include "dag/dag.h"
 #include "dag/dag_prune.h"
+#include "dag/dag_validate.h"
 #include "time_glue.h"
 #include "wallet/wallet_checkpoint.h"
 
@@ -67,8 +68,23 @@ void auto_checkpoint_if_needed(void)
     /*
      * Elaguer le DAG : sans cet elagage, le DAG se remplit jusqu'a
      * DAG_MAX_TRANSACTIONS et bloque toute nouvelle insertion.
+     *
+     * [F-DG-013] Garde-fou timestamp > 0 : checkpoint_create initialise
+     * latest_timestamp a 0 et ne le met a jour que pour les TX
+     * CONFIRMED rencontrees. Si aucune TX CONFIRMED n'existe (DAG plein
+     * uniquement de LOCKED/CANCELLED ou device sans source de temps),
+     * new_chk.timestamp = 0 et dag_prune_before(_, 0) supprimerait toute
+     * TX dont le timestamp est 0 — destruction silencieuse difficile a
+     * diagnostiquer. Si timestamp == 0, on ne prune pas : le checkpoint
+     * suivant declenchera une vraie reduction quand des CONFIRMED
+     * arriveront.
      */
-    dag_prune_before(&s_dag, new_chk.timestamp);
+    if (new_chk.timestamp > 0) {
+        dag_prune_before(&s_dag, new_chk.timestamp);
+    } else {
+        ESP_LOGW(TAG, "Checkpoint timestamp=0 : prune saute pour eviter "
+                      "la suppression silencieuse de TX timestamp=0");
+    }
 
     ESP_LOGI(TAG, "Checkpoint automatique cree + DAG elague "
              "(reste %"PRIu32" TX)", s_dag.count);
@@ -76,7 +92,34 @@ void auto_checkpoint_if_needed(void)
 
 esp_err_t dag_insert_and_track(const transaction_t *tx)
 {
-    esp_err_t ret = dag_insert(&s_dag, tx);
+    /*
+     * [F-DG-001] Validation contextuelle AVANT insertion.
+     *
+     * dag_validate_transaction vérifie que :
+     *  1. la TX n'existe pas déjà (anti-double-insert),
+     *  2. tous les parents référencés sont présents dans le DAG,
+     *  3. la TX ne se référence pas elle-même comme parent (anti-cycle).
+     *
+     * Avant ce fix, cette fonction était écrite mais JAMAIS appelée en
+     * production (seul test_dag.c l'invoquait). Le chemin local
+     * (initiate_payment, initiate_mint, attempt_beneficiary_forward)
+     * s'appuyait uniquement sur dag_insert qui ne vérifie ni l'existence
+     * des parents ni l'absence de cycle. Le risque pratique était
+     * faible parce que les parents viennent de dag_get_tips, mais
+     * aucun filet n'existait en cas de bug de sélection des tips ou
+     * d'appel direct à dag_insert depuis du code futur.
+     *
+     * On retourne ESP_ERR_INVALID_ARG pour une TX malformée
+     * (parent inconnu, self-loop) — cohérent avec le code de retour
+     * que dag_insert utilise pour ses propres rejets.
+     */
+    esp_err_t ret = dag_validate_transaction(&s_dag, tx);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "TX rejetee par dag_validate_transaction: 0x%x", ret);
+        return ret;
+    }
+
+    ret = dag_insert(&s_dag, tx);
     if (ret != ESP_OK) {
         return ret;
     }

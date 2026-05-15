@@ -40,8 +40,11 @@ typedef enum {
  * @param[in,out] dag         DAG local
  * @param[in]     tx          Transaction distante à fusionner
  * @param[in]     master_keys Liste des clés maîtres autorisées pour les MINT.
- *                            Peut être NULL si on ne veut pas vérifier les MINT
- *                            (déconseillé en production).
+ *                            [F-DG-002] Si NULL, tous les MINT sont REJETÉS
+ *                            (l'ancien comportement "accepter sans vérif"
+ *                            ouvrait une faille d'authentification). Pour les
+ *                            tests qui ne mergent que des TRANSFER, passer
+ *                            NULL reste valide — les MINT seront rejetés.
  * @param[out]    result      Résultat de la fusion
  * @return ESP_OK en cas de succès (même si DUPLICATE ou REJECTED)
  *         ESP_ERR_NO_MEM si le DAG est plein (REJECTED)

@@ -23,14 +23,37 @@ esp_err_t dag_prune_before(dag_t *dag, uint64_t before_timestamp)
     xSemaphoreTakeRecursive(dag->mutex, portMAX_DELAY);
 
     /*
-     * Compacter le tableau en ne gardant que les TX dont le timestamp
-     * est strictement supérieur à before_timestamp.
-     * On parcourt le tableau une seule fois en écrasant les TX à supprimer.
+     * Compacter le tableau en ne gardant que les TX qui doivent rester.
+     *
+     * Critère de conservation :
+     *  - timestamp strictement supérieur à before_timestamp (TX récente), OU
+     *  - statut == LOCKED (paiement en attente d'ACK, [F-DG-005]).
+     *
+     * [F-DG-005] On ne purge JAMAIS une TX LOCKED, même si son timestamp
+     * est ancien. Conserver les LOCKED évite que la lock_table côté
+     * core_task devienne orpheline : si une TX LOCKED était prunée,
+     * son entrée resterait dans s_lock_table jusqu'au prochain
+     * lock_table_expire, qui appellerait dag_set_status sur un hash
+     * inexistant (NOT_FOUND silencieusement ignoré), bloquant le
+     * montant verrouillé indéfiniment. Pire : si l'attestation LoRa
+     * du destinataire arrivait après le prune, dag_get_by_id
+     * retournerait NULL et la confirmation serait perdue.
+     *
+     * Les TX CONFIRMED anciennes ont été consolidées dans le checkpoint
+     * (calcul de solde), donc on peut les retirer du DAG. Les CANCELLED
+     * anciennes ne sont plus utiles (pas dans le checkpoint, pas dans
+     * la lock_table active). Les LOCKED restent jusqu'à expiration ou
+     * confirmation (au prochain prune leur timestamp sera toujours
+     * "ancien", mais leur statut aura changé, donc elles partiront).
      */
     uint32_t write_idx = 0;
 
     for (uint32_t read_idx = 0; read_idx < dag->count; read_idx++) {
-        if (dag->transactions[read_idx].timestamp > before_timestamp) {
+        const transaction_t *tx = &dag->transactions[read_idx];
+        bool keep = (tx->timestamp > before_timestamp) ||
+                    (tx->status == TX_STATUS_LOCKED);
+
+        if (keep) {
             /* Garder cette transaction */
             if (write_idx != read_idx) {
                 memcpy(&dag->transactions[write_idx],
@@ -79,6 +102,13 @@ bool dag_needs_checkpoint(const dag_t *dag)
      * création et de sauvegarde. Sans cette marge, le DAG se remplit
      * complètement et les nouvelles TX sont rejetées pendant le
      * processus de checkpoint.
+     *
+     * [F-DG-023 / F-DG-024] On délègue à dag_count() qui prend le
+     * mutex, plutôt que de lire dag->count directement (incohérent
+     * avec le reste de l'API qui passe systématiquement par le mutex).
+     * Cela ferme le risque qu'un futur caller invoque
+     * dag_needs_checkpoint depuis un contexte sans s_state_mutex et
+     * lise un dag->count en cours d'écriture par dag_merge_transaction.
      */
-    return dag->count >= (DAG_MAX_TRANSACTIONS * 4 / 5);
+    return dag_count(dag) >= (DAG_MAX_TRANSACTIONS * 4 / 5);
 }

@@ -12,7 +12,34 @@
 
 #include "wallet/wallet.h"
 #include "wallet/wallet_checkpoint.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <string.h>
+
+/*
+ * [F-DG-008] Helpers internes pour acquérir/relâcher le mutex récursif
+ * du DAG depuis wallet.c. L'itération directe sur dag->transactions[]
+ * dans wallet_get_balance et wallet_get_balance_for ne prenait aucun
+ * mutex, créant une race condition avec dag_merge_transaction qui peut
+ * être appelée depuis la tâche LoRa pendant que wallet_get_balance est
+ * appelée depuis la tâche core. Le mutex DAG est récursif, donc le
+ * prendre ici est sûr même si l'appelant le détient déjà
+ * (dag_insert_and_track ne tient pas le mutex DAG pendant ses appels
+ * à wallet_get_balance ; les autres flux ne le tiennent pas non plus).
+ */
+static inline void wallet_dag_lock(const dag_t *dag)
+{
+    if (dag != NULL && dag->mutex != NULL) {
+        xSemaphoreTakeRecursive(dag->mutex, portMAX_DELAY);
+    }
+}
+
+static inline void wallet_dag_unlock(const dag_t *dag)
+{
+    if (dag != NULL && dag->mutex != NULL) {
+        xSemaphoreGiveRecursive(dag->mutex);
+    }
+}
 
 esp_err_t wallet_init(wallet_t *wallet, const public_key_t *owner,
                       dag_t *dag, get_time_ms_fn get_time)
@@ -41,7 +68,13 @@ esp_err_t wallet_get_balance(const wallet_t *wallet, uint32_t base_balance,
      * Calcul du solde en parcourant toutes les transactions du DAG.
      * On utilise des int64 pour éviter les dépassements intermédiaires
      * (le solde final doit être >= 0 et tenir dans un uint32).
+     *
+     * [F-DG-008] On prend le mutex DAG pendant TOUT le scan pour que
+     * dag->count et le contenu de dag->transactions[] soient lus de
+     * manière atomique vis-à-vis d'un dag_merge_transaction concurrent.
      */
+    wallet_dag_lock(wallet->dag);
+
     int64_t balance = (int64_t)base_balance;
 
     for (uint32_t i = 0; i < wallet->dag->count; i++) {
@@ -110,6 +143,7 @@ esp_err_t wallet_get_balance(const wallet_t *wallet, uint32_t base_balance,
     }
 
     *available = (uint32_t)balance;
+    wallet_dag_unlock(wallet->dag);
     return ESP_OK;
 }
 
@@ -119,18 +153,32 @@ esp_err_t wallet_get_total_minted(const dag_t *dag, uint64_t *total_minted)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* [F-DG-008] Scan sous mutex pour cohérence avec dag_merge concurrent. */
+    wallet_dag_lock(dag);
+
     uint64_t total = 0;
 
     for (uint32_t i = 0; i < dag->count; i++) {
         const transaction_t *tx = &dag->transactions[i];
 
-        /* Sommer les MINT confirmés uniquement */
+        /*
+         * Sommer les MINT confirmés uniquement.
+         * [F-DG-025] Garde-fou de saturation : si l'addition dépasse
+         * UINT64_MAX (cas théorique extrême), on sature à UINT64_MAX
+         * plutôt que de produire un wrap-around silencieux. Cohérent
+         * avec le guard [H1] de wallet_checkpoint.c.
+         */
         if (tx->type == TX_TYPE_MINT && tx->status == TX_STATUS_CONFIRMED) {
-            total += tx->amount;
+            if (total > UINT64_MAX - tx->amount) {
+                total = UINT64_MAX;
+            } else {
+                total += tx->amount;
+            }
         }
     }
 
     *total_minted = total;
+    wallet_dag_unlock(dag);
     return ESP_OK;
 }
 
@@ -161,9 +209,13 @@ esp_err_t wallet_get_balance_for(const dag_t *dag,
      *    credits/debits pour le target.
      *    Meme logique que wallet_get_balance mais la pubkey cible et
      *    le fee_recipient sont des parametres (pas tires du wallet).
+     *
+     * [F-DG-008] Scan sous mutex DAG pour cohérence vs dag_merge.
      */
     bool has_fee_recipient = (fee_recipient != NULL &&
                               !public_key_is_zero(fee_recipient));
+
+    wallet_dag_lock(dag);
 
     for (uint32_t i = 0; i < dag->count; i++) {
         const transaction_t *tx = &dag->transactions[i];
@@ -200,5 +252,6 @@ esp_err_t wallet_get_balance_for(const dag_t *dag,
     if (acc > UINT32_MAX) acc = UINT32_MAX;
 
     *balance = (uint32_t)acc;
+    wallet_dag_unlock(dag);
     return ESP_OK;
 }

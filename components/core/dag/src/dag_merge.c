@@ -16,7 +16,11 @@
 #include "transaction/tx_validate.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_log.h"
+#include <assert.h>
 #include <string.h>
+
+static const char *TAG = "dag_merge";
 
 esp_err_t dag_merge_transaction(dag_t *dag, const transaction_t *tx,
                                 const master_keys_t *master_keys,
@@ -26,6 +30,64 @@ esp_err_t dag_merge_transaction(dag_t *dag, const transaction_t *tx,
         return ESP_ERR_INVALID_ARG;
     }
 
+    /*
+     * [F-DG-014] Validations cryptographiques HORS section critique.
+     *
+     * tx_validate_structure et tx_validate_signature n'accèdent pas
+     * au DAG (elles ne lisent que `tx` lui-même), donc on peut les
+     * exécuter sans tenir le mutex. tx_validate_signature recalcule
+     * un hash SHA-256 et vérifie une signature Ed25519 — opération
+     * lourde (~5 ms sur ESP32) qui bloquait précédemment toutes les
+     * autres opérations DAG concurrentes. Avec ce déplacement, le
+     * mutex n'est tenu que pendant les opérations rapides : doublon,
+     * conflit seq, insertion.
+     *
+     * Conséquence : un mauvais comportement crypto (signature
+     * invalide, structure malformée) est détecté tôt sans pénaliser
+     * les autres threads.
+     */
+
+    /* Étape 1 : vérification structurelle (sans lock). */
+    if (tx_validate_structure(tx) != ESP_OK) {
+        *result = DAG_MERGE_REJECTED;
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Étape 2 : vérification du hash et de la signature Ed25519 (sans lock). */
+    if (tx_validate_signature(tx) != ESP_OK) {
+        *result = DAG_MERGE_REJECTED;
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
+     * Étape 3 : pour les MINT, vérifier que le signataire est un maître
+     * autorisé (sans lock).
+     *
+     * [F-DG-002] Si master_keys == NULL, on REJETTE le MINT au lieu de
+     * l'accepter aveuglément. L'ancien comportement (skip de la vérif
+     * d'autorité quand master_keys est NULL) ouvrait une surface
+     * d'attaque : tout caller passant NULL — par commodité ou par bug
+     * — désactivait silencieusement la vérification d'autorité, et un
+     * attaquant LoRa pouvait injecter un MINT signé avec sa propre clé.
+     * On garde la possibilité de passer NULL pour le code de test qui
+     * n'a pas besoin de cette vérification (TRANSFER uniquement), mais
+     * tout MINT reçu via cette voie est désormais rejeté explicitement.
+     */
+    if (tx->type == TX_TYPE_MINT) {
+        if (master_keys == NULL) {
+            *result = DAG_MERGE_REJECTED;
+            return ESP_ERR_INVALID_ARG;
+        }
+        if (tx_validate_master(tx, master_keys) != ESP_OK) {
+            *result = DAG_MERGE_REJECTED;
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    /*
+     * À partir d'ici on a besoin du DAG : doublon, conflit seq,
+     * insertion. Section critique aussi courte que possible.
+     */
     xSemaphoreTakeRecursive(dag->mutex, portMAX_DELAY);
 
     /* Si la transaction existe déjà → doublon, on ignore */
@@ -69,41 +131,14 @@ esp_err_t dag_merge_transaction(dag_t *dag, const transaction_t *tx,
     }
 
     /*
-     * Validation cryptographique de la transaction reçue via LoRa.
-     *
-     * Avant d'insérer dans le DAG, on vérifie :
-     * 1. La structure (invariants de base : montant > 0, parents, type...)
-     * 2. La signature Ed25519 (hash recalculé + vérification signature)
-     * 3. Pour les MINT : que le signataire est un maître autorisé
-     *
-     * Sans ces vérifications, un attaquant pourrait injecter des TX
-     * forgées via LoRa (faux MINT, signatures invalides, etc.).
+     * Insérer la transaction (les parents manquants ne sont PAS bloquants).
+     * [F-DG-010] Assert défensif sur la capacité : la vérification
+     * ci-dessus garantit dag->count < DAG_MAX_TRANSACTIONS, mais on
+     * laisse une trace explicite à l'usage du compactage manuel — si
+     * un futur refactoring supprime ce check, l'assert sautera en
+     * debug avant tout out-of-bounds.
      */
-
-    /* Étape 1 : vérification structurelle */
-    if (tx_validate_structure(tx) != ESP_OK) {
-        *result = DAG_MERGE_REJECTED;
-        xSemaphoreGiveRecursive(dag->mutex);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    /* Étape 2 : vérification du hash et de la signature Ed25519 */
-    if (tx_validate_signature(tx) != ESP_OK) {
-        *result = DAG_MERGE_REJECTED;
-        xSemaphoreGiveRecursive(dag->mutex);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    /* Étape 3 : pour les MINT, vérifier que le signataire est un maître autorisé */
-    if (tx->type == TX_TYPE_MINT && master_keys != NULL) {
-        if (tx_validate_master(tx, master_keys) != ESP_OK) {
-            *result = DAG_MERGE_REJECTED;
-            xSemaphoreGiveRecursive(dag->mutex);
-            return ESP_ERR_INVALID_ARG;
-        }
-    }
-
-    /* Insérer la transaction (les parents manquants ne sont PAS bloquants) */
+    assert(dag->count < DAG_MAX_TRANSACTIONS);
     memcpy(&dag->transactions[dag->count], tx, sizeof(transaction_t));
     dag->count++;
 
@@ -129,6 +164,24 @@ esp_err_t dag_merge_batch(dag_t *dag, const transaction_t *transactions,
 
         if (result == DAG_MERGE_INSERTED) {
             (*inserted_count)++;
+        } else {
+            /*
+             * [F-DG-015] Tracer les TX du lot non insérées pour
+             * faciliter le diagnostic. Avant ce fix, dag_merge_batch
+             * ignorait silencieusement DUPLICATE / CONFLICT / REJECTED
+             * et l'appelant ne pouvait que constater `inserted_count <
+             * count` sans savoir pourquoi.
+             */
+            const char *reason = "?";
+            switch (result) {
+                case DAG_MERGE_DUPLICATE: reason = "duplicate"; break;
+                case DAG_MERGE_CONFLICT:  reason = "seq-conflict"; break;
+                case DAG_MERGE_REJECTED:  reason = "rejected"; break;
+                default: break;
+            }
+            ESP_LOGW(TAG, "Batch TX %lu/%lu: %s (err=0x%x)",
+                     (unsigned long)(i + 1), (unsigned long)count,
+                     reason, err);
         }
 
         /* Si le DAG est plein, on arrête */

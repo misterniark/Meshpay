@@ -82,10 +82,31 @@ esp_err_t dag_insert(dag_t *dag, const transaction_t *tx);
  *
  * Recherche linéaire O(n) dans le tableau.
  *
+ * [F-DG-003] DURÉE DE VIE DU POINTEUR RETOURNÉ — IMPORTANT.
+ * Le pointeur retourné pointe directement dans le tableau interne
+ * dag->transactions[] et n'est valide que tant que :
+ *   1. Aucune insertion (dag_insert / dag_merge_*) n'a lieu, ET
+ *   2. Aucun élagage (dag_prune_*) n'a lieu, ET
+ *   3. Plus généralement, aucune modification du DAG.
+ *
+ * En pratique, le mutex interne du DAG (`dag->mutex`) est relâché
+ * avant le retour de cette fonction. La sécurité d'utilisation
+ * repose donc entièrement sur la discipline de l'appelant qui doit
+ * maintenir une exclusion mutuelle au niveau applicatif
+ * (typiquement `s_state_mutex` côté core_task) entre l'obtention
+ * du pointeur et sa dernière utilisation, OU recopier la TX
+ * immédiatement.
+ *
+ * Risque concret : après un dag_prune_before, le tableau est
+ * compacté (memmove/memcpy) et le pointeur précédemment obtenu
+ * pointe vers une zone qui contient désormais une TX différente
+ * (ou zéroïsée). Aucune protection runtime ne détecte cette
+ * invalidation.
+ *
  * @param[in]  dag DAG source
  * @param[in]  id  Hash de la transaction recherchée
  * @return Pointeur vers la transaction si trouvée, NULL sinon.
- *         Le pointeur est valide tant que le DAG n'est pas modifié.
+ *         Valide uniquement sous mutex applicatif (cf. ci-dessus).
  */
 const transaction_t *dag_get_by_id(const dag_t *dag, const hash_t *id);
 

@@ -2,9 +2,14 @@
  * @file dag_prune.h
  * @brief Élagage du DAG (suppression des transactions anciennes).
  *
- * Quand la fenêtre glissante est pleine (500 TX), un checkpoint est créé
- * (par le module wallet) et les transactions antérieures sont purgées.
+ * Quand la fenêtre glissante atteint son seuil (80% de
+ * DAG_MAX_TRANSACTIONS = 250 — soit 200 TX), un checkpoint est créé
+ * par le module wallet et les transactions antérieures sont purgées.
  * Ce module fournit les fonctions de purge.
+ *
+ * [F-DG-012] La valeur historique "500 TX" mentionnée dans ce
+ * commentaire avant 2026-05-15 était périmée : le seuil a été réduit
+ * à 250 pour tenir dans la DRAM ESP32 partagée avec LVGL + Wi-Fi.
  */
 
 #ifndef DAG_PRUNE_H
@@ -46,11 +51,13 @@ esp_err_t dag_prune_all(dag_t *dag);
 /**
  * @brief Vérifie si le DAG a besoin d'un checkpoint.
  *
- * Retourne true si le nombre de transactions a atteint le seuil
- * de 500 (taille de la fenêtre glissante).
+ * Retourne true si le nombre de transactions a atteint 80% de
+ * DAG_MAX_TRANSACTIONS (la marge de 20% laisse le temps de créer
+ * et de sauvegarder le checkpoint avant que le DAG ne sature
+ * complètement).
  *
  * @param[in] dag DAG à vérifier
- * @return true si le DAG est plein et nécessite un checkpoint
+ * @return true si le DAG atteint le seuil et nécessite un checkpoint
  */
 bool dag_needs_checkpoint(const dag_t *dag);
 

@@ -30,6 +30,17 @@ static void make_hash(hash_t *h, uint8_t fill)
  * @brief Crée une transaction MINT simple pour peupler le DAG dans les tests.
  *
  * Utilise un hash fictif comme parent et un timestamp donné.
+ *
+ * [F-DG-026] LIMITATION : ce helper hardcode `seq=0`. Plusieurs MINT
+ * créés depuis le même `master` auront tous le même `seq` et seraient
+ * rejetés par `dag_merge_transaction` (DAG_MERGE_CONFLICT) car le
+ * détecteur de double-dépense (I3-fix) repose sur l'unicité du couple
+ * (from, seq). Pour les tests d'insertion directe via `dag_insert`
+ * cela ne pose pas de problème (dag_insert ne vérifie pas seq), mais
+ * tout test impliquant le pipeline merge doit appeler `tx_create_mint`
+ * directement avec des seq distincts (cf. `dag_merge_batch_test` qui
+ * utilise seq=1, 2, 3 explicitement), ou utiliser
+ * create_test_mint_seq ci-dessous.
  */
 static esp_err_t create_test_mint(transaction_t *tx, keypair_t *master,
                                    keypair_t *user, uint32_t amount,
@@ -37,6 +48,26 @@ static esp_err_t create_test_mint(transaction_t *tx, keypair_t *master,
 {
     return tx_create_mint(tx, master, &user->public_key,
                           amount, 0, 0, parent, 1, timestamp);
+}
+
+/**
+ * [F-DG-026] Variante paramétrée par `seq`, utilisable pour tester
+ * des scénarios multi-MINT du même émetteur via le pipeline merge.
+ *
+ * Le `__attribute__((unused))` documente que ce helper est fourni
+ * comme outil partagé pour les futurs tests d'intégration merge,
+ * sans être encore utilisé par les tests existants (qui appellent
+ * `tx_create_mint` directement ou passent par `create_test_mint`
+ * avec insertion via `dag_insert` qui ne valide pas le seq).
+ */
+static __attribute__((unused))
+esp_err_t create_test_mint_seq(transaction_t *tx, keypair_t *master,
+                                keypair_t *user, uint32_t amount,
+                                uint32_t seq,
+                                const hash_t *parent, uint64_t timestamp)
+{
+    return tx_create_mint(tx, master, &user->public_key,
+                          amount, 0, seq, parent, 1, timestamp);
 }
 
 /* ========================================================================= */
@@ -534,4 +565,166 @@ TEST_CASE("dag_merge_meme_seq_emetteurs_differents", "[dag]")
     TEST_ASSERT_EQUAL(DAG_MERGE_INSERTED, r_b);
 
     TEST_ASSERT_EQUAL(2, dag_count(&dag));
+}
+
+/* ========================================================================= */
+/*           Tests ajoutes par l'audit 2026-05-15 (F-DG-027/028/029)         */
+/* ========================================================================= */
+
+/**
+ * [F-DG-027] Verifie que dag_set_status rejette les transitions
+ * interdites depuis un etat terminal.
+ *
+ * Cycle de vie attendu :
+ *   LOCKED   → CONFIRMED  : autorise
+ *   LOCKED   → CANCELLED  : autorise
+ *   CONFIRMED → quoi que ce soit : interdit (terminal)
+ *   CANCELLED → quoi que ce soit : interdit (terminal)
+ *   Same-status : idempotent (ESP_OK silencieux)
+ */
+TEST_CASE("dag_set_status_transitions_invalides_rejetees", "[dag]")
+{
+    dag_t dag;
+    TEST_ASSERT_EQUAL(ESP_OK, dag_init(&dag));
+
+    keypair_t master, user;
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_generate_keypair(&master));
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_generate_keypair(&user));
+    hash_t parent;
+    memset(&parent, 0xAB, sizeof(parent));
+
+    /* Inserer une TX LOCKED (statut par defaut a la creation manuelle) */
+    transaction_t tx;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        create_test_mint(&tx, &master, &user, 100, &parent, 1000));
+    tx.status = TX_STATUS_LOCKED;
+    TEST_ASSERT_EQUAL(ESP_OK, dag_insert(&dag, &tx));
+
+    /* LOCKED → CONFIRMED : autorise */
+    TEST_ASSERT_EQUAL(ESP_OK,
+        dag_set_status(&dag, &tx.id, TX_STATUS_CONFIRMED));
+
+    /* CONFIRMED → CONFIRMED : idempotent */
+    TEST_ASSERT_EQUAL(ESP_OK,
+        dag_set_status(&dag, &tx.id, TX_STATUS_CONFIRMED));
+
+    /* CONFIRMED → CANCELLED : INTERDIT (etat terminal) */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE,
+        dag_set_status(&dag, &tx.id, TX_STATUS_CANCELLED));
+
+    /* CONFIRMED → LOCKED : INTERDIT (etat terminal) */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE,
+        dag_set_status(&dag, &tx.id, TX_STATUS_LOCKED));
+
+    /* Hash inconnu : NOT_FOUND */
+    hash_t unknown;
+    memset(&unknown, 0xFF, sizeof(unknown));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND,
+        dag_set_status(&dag, &unknown, TX_STATUS_CONFIRMED));
+}
+
+/**
+ * [F-DG-028] Verifie que dag_insert rejette la TX qui sature le DAG.
+ *
+ * On remplit le DAG jusqu'a DAG_MAX_TRANSACTIONS avec des TX distinctes
+ * (parents et seq differents) puis on tente d'inserer une TX de plus
+ * — doit retourner ESP_ERR_NO_MEM sans crash.
+ *
+ * Note : on alloue le dag_t en static pour eviter l'overflow de pile
+ * (sizeof(dag_t) ≈ 58 Ko, depasse la pile par defaut des taches Unity).
+ */
+TEST_CASE("dag_insert_saturation_rejette_la_251eme", "[dag]")
+{
+    static dag_t dag;
+    TEST_ASSERT_EQUAL(ESP_OK, dag_init(&dag));
+
+    keypair_t master, user;
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_generate_keypair(&master));
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_generate_keypair(&user));
+    hash_t parent;
+    memset(&parent, 0xAB, sizeof(parent));
+
+    /* Remplir le DAG (DAG_MAX_TRANSACTIONS = 250).
+     * On utilise des timestamps croissants pour avoir des hashes
+     * distincts (le hash inclut le timestamp via tx_serialize). */
+    for (uint32_t i = 0; i < DAG_MAX_TRANSACTIONS; i++) {
+        transaction_t tx;
+        TEST_ASSERT_EQUAL(ESP_OK,
+            create_test_mint(&tx, &master, &user,
+                              (uint32_t)(100 + i), &parent,
+                              (uint64_t)(1000 + i)));
+        TEST_ASSERT_EQUAL(ESP_OK, dag_insert(&dag, &tx));
+    }
+
+    TEST_ASSERT_EQUAL(DAG_MAX_TRANSACTIONS, dag_count(&dag));
+
+    /* TX 251 : doit etre rejetee */
+    transaction_t overflow_tx;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        create_test_mint(&overflow_tx, &master, &user, 9999, &parent,
+                          (uint64_t)(1000 + DAG_MAX_TRANSACTIONS)));
+    TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, dag_insert(&dag, &overflow_tx));
+
+    /* Le DAG est toujours a la limite, pas overflow */
+    TEST_ASSERT_EQUAL(DAG_MAX_TRANSACTIONS, dag_count(&dag));
+}
+
+/**
+ * [F-DG-005 / F-DG-029] Verifie que dag_prune_before NE supprime PAS
+ * les TX LOCKED, meme si leur timestamp est ancien.
+ *
+ * Scenario : 3 TX inserees avec timestamps 100, 200, 300.
+ * - TX 100 est CONFIRMED → doit etre prunee
+ * - TX 200 est LOCKED    → doit etre conservee malgre son timestamp ancien
+ * - TX 300 est CONFIRMED → doit etre conservee (timestamp > seuil)
+ *
+ * Apres prune avant timestamp 250 :
+ *   - dag_count() == 2 (TX 200 LOCKED + TX 300 CONFIRMED)
+ *   - dag_get_by_id sur TX 200 retourne non-NULL
+ */
+TEST_CASE("dag_prune_preserve_locked_meme_si_ancienne", "[dag]")
+{
+    dag_t dag;
+    TEST_ASSERT_EQUAL(ESP_OK, dag_init(&dag));
+
+    keypair_t master, user;
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_generate_keypair(&master));
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_generate_keypair(&user));
+    hash_t parent;
+    memset(&parent, 0xAB, sizeof(parent));
+
+    transaction_t tx_confirmed_old, tx_locked_old, tx_confirmed_new;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        create_test_mint(&tx_confirmed_old, &master, &user, 10, &parent, 100));
+    tx_confirmed_old.status = TX_STATUS_CONFIRMED;
+
+    TEST_ASSERT_EQUAL(ESP_OK,
+        create_test_mint(&tx_locked_old, &master, &user, 20, &parent, 200));
+    tx_locked_old.status = TX_STATUS_LOCKED;
+
+    TEST_ASSERT_EQUAL(ESP_OK,
+        create_test_mint(&tx_confirmed_new, &master, &user, 30, &parent, 300));
+    tx_confirmed_new.status = TX_STATUS_CONFIRMED;
+
+    TEST_ASSERT_EQUAL(ESP_OK, dag_insert(&dag, &tx_confirmed_old));
+    TEST_ASSERT_EQUAL(ESP_OK, dag_insert(&dag, &tx_locked_old));
+    TEST_ASSERT_EQUAL(ESP_OK, dag_insert(&dag, &tx_confirmed_new));
+    TEST_ASSERT_EQUAL(3, dag_count(&dag));
+
+    /* Prune avant timestamp 250 :
+     *   - 100 CONFIRMED → supprime
+     *   - 200 LOCKED    → conserve (F-DG-005)
+     *   - 300 CONFIRMED → conserve (timestamp > seuil)
+     */
+    TEST_ASSERT_EQUAL(ESP_OK, dag_prune_before(&dag, 250));
+    TEST_ASSERT_EQUAL(2, dag_count(&dag));
+
+    /* La LOCKED ancienne est toujours retrouvable */
+    const transaction_t *still_locked =
+        dag_get_by_id(&dag, &tx_locked_old.id);
+    TEST_ASSERT_NOT_NULL(still_locked);
+    TEST_ASSERT_EQUAL(TX_STATUS_LOCKED, still_locked->status);
+
+    /* La CONFIRMED ancienne a bien disparu */
+    TEST_ASSERT_NULL(dag_get_by_id(&dag, &tx_confirmed_old.id));
 }
