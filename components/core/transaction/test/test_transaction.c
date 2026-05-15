@@ -260,6 +260,7 @@ TEST_CASE("serialize_deserialize_mint", "[transaction]")
     TEST_ASSERT_EQUAL(TX_TYPE_MINT, tx_restored.type);
     TEST_ASSERT_EQUAL(TX_STATUS_CONFIRMED, tx_restored.status);
     TEST_ASSERT_EQUAL(1000, tx_restored.amount);
+    TEST_ASSERT_EQUAL(ESP_OK, tx_validate_signature(&tx_restored));
 }
 
 /* ========================================================================= */

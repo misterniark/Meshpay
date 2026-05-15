@@ -96,7 +96,7 @@ esp_err_t tx_validate_signature(const transaction_t *tx)
      * 1. Le hash SHA-256 correspond au champ id
      * 2. La signature Ed25519 est valide
      */
-    uint8_t cbor_buf[200];
+    uint8_t cbor_buf[TX_CBOR_MAX_SIZE];
     size_t cbor_len = 0;
 
     esp_err_t err = tx_serialize_signable(tx, cbor_buf, sizeof(cbor_buf), &cbor_len);

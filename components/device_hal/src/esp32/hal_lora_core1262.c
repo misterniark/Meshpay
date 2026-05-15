@@ -345,7 +345,9 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
         .quadhd_io_num   = -1,
         .max_transfer_sz = HAL_LORA_MAX_PACKET_SIZE + 16,
     };
-    esp_err_t err = spi_bus_initialize(ctx->spi_host, &bus_cfg, SPI_DMA_CH_AUTO);
+    /* Paquets SX1262 <= 255 octets : le DMA n'apporte rien ici et peut
+     * entrer en concurrence avec le SPI LCD, qui en a besoin pour LVGL. */
+    esp_err_t err = spi_bus_initialize(ctx->spi_host, &bus_cfg, SPI_DMA_DISABLED);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_initialize echoue: %d", err);
         return HAL_ERR_IO;

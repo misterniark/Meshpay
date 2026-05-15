@@ -24,7 +24,7 @@
  * Utilisé pour sérialiser le contenu signable avant de le hasher et signer.
  * La taille est suffisante pour tous les champs signables.
  */
-#define TX_CREATE_BUFFER_SIZE 200
+#define TX_CREATE_BUFFER_SIZE TX_CBOR_MAX_SIZE
 
 /**
  * @brief Remplit les champs communs et calcule le hash + signature.

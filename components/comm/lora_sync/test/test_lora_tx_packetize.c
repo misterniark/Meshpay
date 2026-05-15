@@ -11,8 +11,11 @@
 #include "comm/lora_tx_packetize.h"
 #include "comm/comm_msg.h"   /* COMM_MSG_LORA_TX, COMM_MSG_LORA_FRAG, COMM_MSG_LORA_MAX */
 #include "comm/lora_frag.h"
+#include "transaction/tx_create.h"
 #include "transaction/tx_serialize.h"
 #include "transaction/tx_types.h"
+#include "transaction/tx_validate.h"
+#include "crypto/crypto_keys.h"
 #include "esp_err.h"
 #include <string.h>
 
@@ -131,6 +134,67 @@ TEST_CASE("packetize_large_tx_roundtrip", "[lora_tx_packetize]")
     memset(&restored, 0, sizeof(restored));
     TEST_ASSERT_EQUAL(ESP_OK, tx_deserialize(result, result_len, &restored));
     TEST_ASSERT_EQUAL_MEMORY(&original, &restored, sizeof(transaction_t));
+}
+
+TEST_CASE("packetize_created_mint_roundtrip_valid_signature", "[lora_tx_packetize]")
+{
+    keypair_t master, user;
+    crypto_generate_keypair(&master);
+    crypto_generate_keypair(&user);
+
+    hash_t parent;
+    memset(parent.bytes, 0x42, sizeof(parent.bytes));
+
+    transaction_t original;
+    TEST_ASSERT_EQUAL(ESP_OK, tx_create_mint(&original,
+                                             &master,
+                                             &user.public_key,
+                                             1234,
+                                             0xAABBCCDDu,
+                                             17,
+                                             &parent,
+                                             1,
+                                             UINT64_MAX));
+
+    uint8_t packets[LORA_FRAG_MAX_FRAGMENTS][LORA_FRAG_PACKET_MAX];
+    size_t  packet_lens[LORA_FRAG_MAX_FRAGMENTS];
+    uint8_t count = 0;
+    TEST_ASSERT_EQUAL(0, lora_tx_packetize(&original, 12,
+                                           packets, packet_lens, &count));
+
+    transaction_t restored;
+    memset(&restored, 0, sizeof(restored));
+    if (count == 1) {
+        TEST_ASSERT_EQUAL(COMM_MSG_LORA_TX, packets[0][0]);
+        TEST_ASSERT_EQUAL(ESP_OK, tx_deserialize(&packets[0][1],
+                                                 packet_lens[0] - 1,
+                                                 &restored));
+    } else {
+        lora_frag_ctx_t ctx;
+        lora_frag_ctx_init(&ctx);
+        bool complete = false;
+        for (uint8_t i = 0; i < count; i++) {
+            complete = lora_frag_receive(&ctx,
+                                         packets[i][1],
+                                         packets[i][2],
+                                         packets[i][3],
+                                         &packets[i][LORA_FRAG_HEADER_SIZE],
+                                         packet_lens[i] - LORA_FRAG_HEADER_SIZE,
+                                         0);
+        }
+        TEST_ASSERT_TRUE(complete);
+
+        uint8_t result[LORA_FRAG_MAX_FRAGMENTS * LORA_FRAG_PAYLOAD_MAX];
+        size_t  result_len = 0;
+        TEST_ASSERT_EQUAL(0, lora_frag_get_result(&ctx, result,
+                                                  sizeof(result),
+                                                  &result_len));
+        TEST_ASSERT_EQUAL(ESP_OK, tx_deserialize(result, result_len, &restored));
+    }
+
+    TEST_ASSERT_EQUAL(TX_TYPE_MINT, restored.type);
+    TEST_ASSERT_EQUAL(TX_STATUS_CONFIRMED, restored.status);
+    TEST_ASSERT_EQUAL(ESP_OK, tx_validate_signature(&restored));
 }
 
 TEST_CASE("packetize_null_args", "[lora_tx_packetize]")

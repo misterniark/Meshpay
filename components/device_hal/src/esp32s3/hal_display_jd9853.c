@@ -173,8 +173,9 @@ static hal_err_t jd9853_send_cmd(jd9853_ctx_t *ctx, uint8_t cmd)
 
     spi_transaction_t t = {
         .length    = 8,     /* 1 octet = 8 bits */
-        .tx_buffer = &cmd,
+        .flags     = SPI_TRANS_USE_TXDATA,
     };
+    t.tx_data[0] = cmd;
 
     esp_err_t ret = spi_device_polling_transmit(ctx->spi_handle, &t);
     if (ret != ESP_OK) {
@@ -202,9 +203,14 @@ static hal_err_t jd9853_send_data(jd9853_ctx_t *ctx, const uint8_t *data, size_t
     gpio_set_level(JD9853_PIN_DC, 1);
 
     spi_transaction_t t = {
-        .length    = len * 8,  /* Longueur en bits */
-        .tx_buffer = data,
+        .length = len * 8,  /* Longueur en bits */
     };
+    if (len <= sizeof(t.tx_data)) {
+        t.flags = SPI_TRANS_USE_TXDATA;
+        memcpy(t.tx_data, data, len);
+    } else {
+        t.tx_buffer = data;
+    }
 
     esp_err_t ret = spi_device_polling_transmit(ctx->spi_handle, &t);
     if (ret != ESP_OK) {

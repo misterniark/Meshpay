@@ -289,15 +289,15 @@ void ui_task(void *pvParam)
     lv_display_t *disp = lv_display_create(ctx->screen_w, ctx->screen_h);
 
     /*
-     * Allouer les draw buffers (double buffer, 1/10 de l'ecran).
-     * Sur ESP32-S3 avec PSRAM, on pourrait utiliser des buffers plus grands
-     * via MALLOC_CAP_SPIRAM. Sur ESP32 classique, on reste en DMA interne.
+     * Allouer les draw buffers (double buffer, 1/10 de l'ecran) en RAM
+     * interne DMA. Le flush LCD lit ces buffers via SPI DMA : eviter la
+     * PSRAM supprime les surprises de coherence cache sur ESP32-S3.
      */
     size_t buf_size = (size_t)ctx->screen_w * (ctx->screen_h / 10)
                       * sizeof(lv_color16_t);
 
-    uint8_t *buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
-    uint8_t *buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA);
+    uint8_t *buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    uint8_t *buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
 
     if (!buf1 || !buf2) {
         ESP_LOGE(TAG, "Echec alloc draw buffers (%u octets x2)", buf_size);
