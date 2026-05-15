@@ -35,6 +35,13 @@ managed_components/
 *.bin
 *.map
 
+# --- Versioning ----------------------------------------------------------
+# Compteur de build local : incremente automatiquement par CMake a chaque
+# `idf.py build`. Local a chaque developpeur — ne sert qu'a horodater les
+# binaires flashes sur les devices. La version semantique (`VERSION`) reste
+# tracee, elle.
+build_number.txt
+
 # --- IDE / editeurs ------------------------------------------------------
 .vscode/
 .idea/

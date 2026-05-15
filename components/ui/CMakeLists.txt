@@ -56,3 +56,38 @@ else()
                  crypto currency comm_protocol
     )
 endif()
+
+# -----------------------------------------------------------------------------
+# Generation du header meshpay_version.h a chaque build
+#
+# Le composant ui (notamment ui_screen_admin.c) consomme MESHPAY_VERSION_STRING
+# pour l'afficher dans l'ecran d'administration. Le script bump_version.cmake
+# incremente le compteur local et capture date + SHA git a chaque invocation.
+#
+# La cible est marquee ALL : sans output declare, CMake la considere toujours
+# "out-of-date" et la (re)joue donc a chaque `idf.py build`. C'est ce qu'on
+# veut — le compteur ne s'incrementerait pas sinon.
+#
+# MESHPAY_ROOT est resolu depuis l'emplacement physique de ce CMakeLists
+# (`components/ui/CMakeLists.txt`), ce qui rend le chemin correct aussi bien
+# pour le firmware principal que pour test_app/ qui reutilise ce composant.
+# -----------------------------------------------------------------------------
+set(MESHPAY_VERSION_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(MESHPAY_VERSION_HEADER "${MESHPAY_VERSION_HEADER_DIR}/meshpay_version.h")
+set(MESHPAY_ROOT "${CMAKE_CURRENT_LIST_DIR}/../..")
+file(MAKE_DIRECTORY "${MESHPAY_VERSION_HEADER_DIR}")
+
+add_custom_target(meshpay_version_gen ALL
+    BYPRODUCTS "${MESHPAY_VERSION_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+        -DMESHPAY_ROOT=${MESHPAY_ROOT}
+        -DOUTPUT_HEADER=${MESHPAY_VERSION_HEADER}
+        -P ${MESHPAY_ROOT}/tools/cmake/bump_version.cmake
+    COMMENT "MeshPay : generation de meshpay_version.h (bump build counter)"
+    VERBATIM
+)
+
+# Le code consommateur (ui_screen_admin.c) doit pouvoir include "meshpay_version.h"
+# et le lib UI doit etre re-linke quand le header change.
+add_dependencies(${COMPONENT_LIB} meshpay_version_gen)
+target_include_directories(${COMPONENT_LIB} PRIVATE "${MESHPAY_VERSION_HEADER_DIR}")

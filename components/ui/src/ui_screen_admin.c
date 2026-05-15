@@ -17,6 +17,10 @@
 #include "ui/ui_state.h"
 #include "ui/ui_theme.h"
 #include "ui/ui_manager.h"
+/* meshpay_version.h est genere a chaque build dans le build dir du composant
+ * (cf. components/ui/CMakeLists.txt + tools/cmake/bump_version.cmake). Il
+ * fournit MESHPAY_VERSION_STRING au format "v0.1.0 build 47 - 2026-05-15 abc1234". */
+#include "meshpay_version.h"
 
 static lv_obj_t *s_screen = NULL;
 
@@ -147,10 +151,15 @@ static lv_obj_t *screen_create(ui_ctx_t *ctx)
     lv_obj_set_style_border_width(cont, 0, 0);
     lv_obj_set_style_pad_all(cont, small ? 4 : 10, 0);
 
+    /* Hauteur reservee en bas de l'ecran pour le footer "version" (cf. plus
+     * bas). On reduit la grille d'autant pour qu'elle ne recouvre pas le
+     * label de version. */
+    const int FOOTER_H = 18;
+
     if (small) {
         /* Petit ecran paysage (320x172) : grille 2 colonnes compacte */
         lv_obj_set_size(cont, lv_pct(100),
-                        ctx->screen_h - 42);
+                        ctx->screen_h - 42 - FOOTER_H);
         lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 38);
         lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_ROW_WRAP);
         lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_SPACE_EVENLY,
@@ -160,7 +169,7 @@ static lv_obj_t *screen_create(ui_ctx_t *ctx)
     } else {
         /* Grand ecran : grille 2 colonnes x 3 lignes */
         lv_obj_set_size(cont, lv_pct(100),
-                        ctx->screen_h - 54);
+                        ctx->screen_h - 54 - FOOTER_H);
         lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 48);
         lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_ROW_WRAP);
         lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_SPACE_EVENLY,
@@ -184,6 +193,19 @@ static lv_obj_t *screen_create(ui_ctx_t *ctx)
     create_menu_btn(cont, "Renommer device",
                     small ? NULL : rename_cb, small);
     create_menu_btn(cont, "Configurer forward",  forward_cb, small);
+
+    /* --- Footer : numero de version + build (discret, en bas) ---
+     * MESHPAY_VERSION_STRING est genere par CMake a chaque build et a la
+     * forme "v0.1.0 build 47 - 2026-05-15 abc1234". Affiche en petite police
+     * grisee, ancre en bas de l'ecran sans empieter sur la grille. Sert au
+     * support / diagnostic : un utilisateur peut lire ce libelle pour
+     * indiquer precisement quel firmware tourne sur son device. */
+    lv_obj_t *version_lbl = lv_label_create(s_screen);
+    lv_label_set_text(version_lbl, MESHPAY_VERSION_STRING);
+    lv_obj_set_style_text_font(version_lbl, ui_theme_font_normal(), 0);
+    lv_obj_set_style_text_color(version_lbl, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_opa(version_lbl, LV_OPA_60, 0);
+    lv_obj_align(version_lbl, LV_ALIGN_BOTTOM_MID, 0, -2);
 
     return s_screen;
 }
