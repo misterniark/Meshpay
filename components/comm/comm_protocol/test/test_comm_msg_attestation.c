@@ -180,3 +180,128 @@ TEST_CASE("attestation_get_type", "[comm_msg]")
     TEST_ASSERT_EQUAL(0, comm_msg_get_type(buf, 1, &type));
     TEST_ASSERT_EQUAL(COMM_MSG_LORA_ATTESTATION, type);
 }
+
+/* ================================================================
+ * Tests verify_attestation [F-CP-003, audit 2026-05-15]
+ *
+ * Symetrique aux comm_msg_verify_{broadcast,set_alias,set_beneficiary}.
+ * Canonical signed buffer = [tx_id:32], signe par attester_key.
+ * ================================================================ */
+
+#include "crypto/crypto_sign.h"
+#include "crypto/crypto_init.h"
+#include "crypto/crypto_keys.h"
+
+/**
+ * Helper : signe un tx_id avec la cle privee fournie et remplit msg.
+ */
+static void build_signed_attestation(const keypair_t *kp,
+                                      const hash_t *tx_id,
+                                      comm_msg_attestation_t *out_msg)
+{
+    signature_t sig;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        crypto_sign(tx_id->bytes, CRYPTO_HASH_SIZE, kp, &sig));
+
+    memcpy(&out_msg->attester_key, &kp->public_key, sizeof(public_key_t));
+    memcpy(&out_msg->signature, &sig, sizeof(signature_t));
+    memcpy(&out_msg->tx_id, tx_id, sizeof(hash_t));
+}
+
+/**
+ * Cas nominal : une attestation correctement signee doit etre acceptee.
+ */
+TEST_CASE("attestation_verify_signature_valide", "[comm_msg]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_init());
+
+    keypair_t kp;
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_generate_keypair(&kp));
+
+    hash_t tx_id;
+    fill_hash(&tx_id, 0x77);
+
+    comm_msg_attestation_t msg;
+    build_signed_attestation(&kp, &tx_id, &msg);
+
+    TEST_ASSERT_EQUAL(0, comm_msg_verify_attestation(&msg));
+}
+
+/**
+ * Signature garbage : doit etre rejetee.
+ */
+TEST_CASE("attestation_verify_signature_invalide", "[comm_msg]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_init());
+
+    keypair_t kp;
+    crypto_generate_keypair(&kp);
+
+    comm_msg_attestation_t msg;
+    memcpy(&msg.attester_key, &kp.public_key, sizeof(public_key_t));
+    fill_signature(&msg.signature, 0xFF); /* garbage */
+    fill_hash(&msg.tx_id, 0x33);
+
+    TEST_ASSERT_EQUAL(-1, comm_msg_verify_attestation(&msg));
+}
+
+/**
+ * Alteration du tx_id apres signature : rejet attendu.
+ * Verifie l'integrite cryptographique du champ signe.
+ */
+TEST_CASE("attestation_verify_alteration_tx_id_detectee", "[comm_msg]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_init());
+
+    keypair_t kp;
+    crypto_generate_keypair(&kp);
+
+    hash_t tx_id;
+    fill_hash(&tx_id, 0xA5);
+
+    comm_msg_attestation_t msg;
+    build_signed_attestation(&kp, &tx_id, &msg);
+
+    /* Sanity */
+    TEST_ASSERT_EQUAL(0, comm_msg_verify_attestation(&msg));
+
+    /* Alterer un octet du tx_id apres signature */
+    msg.tx_id.bytes[0] ^= 0xFF;
+    TEST_ASSERT_EQUAL(-1, comm_msg_verify_attestation(&msg));
+}
+
+/**
+ * Signature valide sous une AUTRE cle : rejet attendu.
+ * (Empeche un attaquant de substituer attester_key pour faire passer
+ * une signature pour son compte.)
+ */
+TEST_CASE("attestation_verify_mauvais_signataire", "[comm_msg]")
+{
+    TEST_ASSERT_EQUAL(ESP_OK, crypto_init());
+
+    keypair_t kp_signer;
+    keypair_t kp_impostor;
+    crypto_generate_keypair(&kp_signer);
+    crypto_generate_keypair(&kp_impostor);
+
+    hash_t tx_id;
+    fill_hash(&tx_id, 0x42);
+
+    comm_msg_attestation_t msg;
+    build_signed_attestation(&kp_signer, &tx_id, &msg);
+
+    /* Sanity */
+    TEST_ASSERT_EQUAL(0, comm_msg_verify_attestation(&msg));
+
+    /* Remplacer attester_key par celle de l'imposteur */
+    memcpy(&msg.attester_key, &kp_impostor.public_key, sizeof(public_key_t));
+    TEST_ASSERT_EQUAL(-1, comm_msg_verify_attestation(&msg));
+}
+
+/**
+ * Argument NULL : rejet attendu.
+ */
+TEST_CASE("attestation_verify_null", "[comm_msg]")
+{
+    TEST_ASSERT_EQUAL(-1, comm_msg_verify_attestation(NULL));
+}

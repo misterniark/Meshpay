@@ -70,6 +70,19 @@ static uint8_t s_lora_tx_seq_id = 0;
 /** Spinlock protégeant l'acces concurrent a s_frag_ctx [H8] */
 static portMUX_TYPE s_frag_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/*
+ * [F-LS-005] Buffer statique de réassemblage final (sortie de
+ * lora_frag_get_result). Auparavant alloué sur la pile du callback
+ * RX (4 016 octets), il dépassait la pile typique d'une tâche HAL
+ * de 4 Ko. En statique, il consomme la RAM une fois pour toutes et
+ * laisse la pile libre pour les autres allocations. Accédé uniquement
+ * via lora_sync_handle_rx, sous protection du spinlock s_frag_mux
+ * tant qu'il est en cours d'écriture par lora_frag_get_result.
+ * La copie hors-lock (tx_deserialize, validation Ed25519, xQueueSend)
+ * lit ensuite ce buffer en lecture seule jusqu'au prochain fragment.
+ */
+static uint8_t s_frag_result_buf[LORA_FRAG_MAX_FRAGMENTS * LORA_FRAG_PAYLOAD_MAX];
+
 /**
  * Référence statique vers la config pour le callback RX.
  * Nécessaire car le callback hal_lora ne peut pas porter la config
@@ -176,30 +189,73 @@ void lora_sync_handle_rx(const lora_sync_config_t *config,
          * Utiliser le temps injecté via config pour la gestion du
          * timeout de réassemblage. Si get_time n'est pas configuré,
          * on utilise 0 (pas d'expiration automatique).
-         *
-         * Protection par spinlock [H8] pour tout acces a s_frag_ctx.
          */
         uint64_t frag_time = (config->get_time) ? config->get_time() : 0;
 
-        taskENTER_CRITICAL(&s_frag_mux);
-        bool complete = lora_frag_receive(&s_frag_ctx,
-                                           frag_index, total, seq_id,
-                                           payload, payload_len, frag_time);
+        /*
+         * [F-LS-001 + F-LS-002] Section critique réduite au strict
+         * minimum : insertion du fragment, extraction du buffer
+         * réassemblé si complet, et réinitialisation du contexte.
+         * Tout le traitement lourd (tx_deserialize, vérification
+         * Ed25519, xQueueSend) est fait HORS section critique.
+         *
+         * Auparavant, taskENTER_CRITICAL couvrait l'intégralité du
+         * traitement : appeler xQueueSend ou exécuter Ed25519 avec
+         * les interruptions désactivées est interdit par FreeRTOS
+         * et provoque un assert/deadlock dès qu'un fragment complète
+         * un réassemblage (cas nominal pour toute TX > 254 octets).
+         *
+         * La réinitialisation de s_frag_ctx reste DANS la section
+         * critique : sans cela, un fragment concurrent avec le même
+         * seq_id pourrait écraser le buffer en cours d'extraction
+         * (F-LS-002).
+         */
+        bool complete;
+        bool got_result = false;
+        /*
+         * [F-LS-005] Buffer de réassemblage déplacé en statique
+         * (s_frag_result_buf, 4 016 octets) pour libérer la pile du
+         * callback RX. La sécurité d'accès repose sur la garantie de
+         * séquentialité du callback : la HAL LoRa (driver Core1262 ou
+         * Wio-E5) n'invoque lora_rx_callback que depuis sa tâche RX
+         * dédiée, sans réentrance. Tant que cette tâche traite un
+         * fragment complet (extraction sous lock puis tx_deserialize
+         * hors lock), elle ne reçoit pas le suivant — donc pas de
+         * risque d'écrasement du buffer pendant le traitement hors
+         * section critique.
+         *
+         * [F-LS-007] result_len est initialisé à 0 pour éliminer le
+         * faux positif -Wmaybe-uninitialized qui a conduit à désactiver
+         * le warning sur tout le composant (cf. CMakeLists.txt).
+         */
+        size_t result_len = 0;
 
+        taskENTER_CRITICAL(&s_frag_mux);
+        complete = lora_frag_receive(&s_frag_ctx,
+                                      frag_index, total, seq_id,
+                                      payload, payload_len, frag_time);
+        if (complete) {
+            if (lora_frag_get_result(&s_frag_ctx, s_frag_result_buf,
+                                      sizeof(s_frag_result_buf),
+                                      &result_len) == 0) {
+                got_result = true;
+            }
+            /* Réinitialiser le contexte de réassemblage (sous lock). */
+            lora_frag_ctx_init(&s_frag_ctx);
+        }
+        taskEXIT_CRITICAL(&s_frag_mux);
+
+        /*
+         * Traitement lourd hors section critique.
+         * À ce stade, s_frag_ctx a déjà été réinitialisé et
+         * s_frag_result_buf est protégé par la séquentialité du
+         * callback RX (cf. commentaire F-LS-005 ci-dessus).
+         */
         if (complete) {
             ESP_LOGI(TAG, "Réassemblage complet (%u fragments)", total);
-
-            /*
-             * Extraire le buffer réassemblé et traiter comme un LORA_TX.
-             * Le contenu est une TX sérialisée en CBOR (sans le byte de type).
-             */
-            uint8_t result_buf[LORA_FRAG_MAX_FRAGMENTS * LORA_FRAG_PAYLOAD_MAX];
-            size_t result_len;
-            if (lora_frag_get_result(&s_frag_ctx, result_buf,
-                                      sizeof(result_buf),
-                                      &result_len) == 0) {
+            if (got_result) {
                 transaction_t tx;
-                if (tx_deserialize(result_buf, result_len, &tx) == ESP_OK) {
+                if (tx_deserialize(s_frag_result_buf, result_len, &tx) == ESP_OK) {
                     /*
                      * [Lot B item 4] Meme verification de signature qu'en
                      * cas LORA_TX direct, appliquee a la TX reassemblee
@@ -219,11 +275,7 @@ void lora_sync_handle_rx(const lora_sync_config_t *config,
                     }
                 }
             }
-
-            /* Réinitialiser le contexte de réassemblage */
-            lora_frag_ctx_init(&s_frag_ctx);
         }
-        taskEXIT_CRITICAL(&s_frag_mux);
         break;
     }
 
@@ -553,10 +605,17 @@ static void lora_sync_send_one_tx(const lora_sync_config_t *config,
      * partiel, le récepteur a déjà pu voir des fragments portant cet id.
      * Réutiliser le même id dans la TX suivante causerait une collision
      * de réassemblage côté récepteur.
+     *
+     * [F-LS-004] On incrémente INCONDITIONNELLEMENT, même pour les TX
+     * directes (packet_count == 1) qui ne portent pas de seq_id. Cela
+     * simplifie le raisonnement (pas de "réutilisation accidentelle"
+     * possible) et évite un edge case théorique : avec cycle minimal
+     * (90s) et timeout de réassemblage (10s), une suite "frag → direct
+     * → frag" pouvait laisser le 2e frag réutiliser le seq_id du 1er
+     * dans la fenêtre de timeout. Le wrap-around uint8_t (255 cycles)
+     * reste rare en pratique (~6h à 90s/cycle).
      */
-    if (packet_count > 1) {
-        s_lora_tx_seq_id++;
-    }
+    s_lora_tx_seq_id++;
 
     /*
      * Politique best-effort : on continue d'émettre les fragments suivants
@@ -638,14 +697,25 @@ void lora_sync_do_cycle(const lora_sync_config_t *config,
 
     /*
      * Buffer temporaire pour stocker les TX à envoyer.
-     * Max 32 TX par cycle pour limiter le temps d'émission radio.
+     *
+     * [F-LS-006] Réduit de 32 à 8 TX par cycle :
+     * - sizeof(transaction_t) ≈ 276 octets (ESP32 alignement typique)
+     *   → 8 × 276 = ~2.2 Ko sur la pile, contre 8.8 Ko précédemment
+     *   (la tâche LoRa a LORA_TASK_STACK = 24 Ko, mais les buffers de
+     *   lora_sync_send_one_tx — packets[16][255] = 4 Ko — s'y ajoutent
+     *   sur le même chemin d'appel).
+     * - Budget time-on-air EU868 SF9/125kHz : ~330 ms par paquet de
+     *   255 octets. 8 TX × 2 fragments × 330 ms ≈ 5.3 s d'émission par
+     *   cycle de 120 s — sous le plafond duty cycle 1% (1.2 s/120 s ≈
+     *   1%) si les TX restent en un seul paquet et marginal sinon
+     *   (à surveiller, cf. Doctech « 07 - Dette technique »).
      *
      * [Lot C item 7] Phase 1 : recuperer les TX CONFIRMED recentes via
      * le callback fourni par main.c. Le callback gere lui-meme le
      * verrouillage applicatif et copie les TX dans tx_to_send. La
      * couche LoRa n'a plus de visibilite sur le DAG ni sur le mutex.
      */
-    #define SYNC_MAX_TX_PER_CYCLE 32
+    #define SYNC_MAX_TX_PER_CYCLE 8
     transaction_t tx_to_send[SYNC_MAX_TX_PER_CYCLE];
     uint64_t newest_ts = *last_sync_ts;
 
@@ -655,9 +725,28 @@ void lora_sync_do_cycle(const lora_sync_config_t *config,
                                                        &newest_ts,
                                                        config->collect_ctx);
 
-    /* Phase 2 : envoyer les TX via LoRa (sans mutex) */
+    /*
+     * Phase 2 : envoyer les TX via LoRa (sans mutex).
+     *
+     * [F-LS-003] On met à jour *last_sync_ts à newest_ts dans TOUS les
+     * cas — y compris quand tx_count == 0. Le callback collect_confirmed_txs
+     * peut légitimement renseigner newest_ts à une valeur plus récente
+     * que since_ts même sans copier de TX (ex. : il a scanné le DAG
+     * jusqu'à un timestamp donné mais aucune TX n'était CONFIRMED).
+     * Si on retournait sans mise à jour, les TX dont le timestamp est
+     * entre l'ancien et le nouveau newest_ts pourraient être perdues
+     * dans les cycles suivants (le callback ne les considérera plus
+     * comme "nouvelles" puisque since_ts n'a pas avancé, alors qu'il
+     * a déjà signalé être passé au-delà).
+     *
+     * Le contrat de collect_confirmed_txs documenté dans lora_sync.h:53
+     * dit "ou since_ts si rien n'a ete copie" — newest_ts est initialisé
+     * à *last_sync_ts ligne 650, donc si le callback ne touche pas
+     * out_newest_ts, l'assignation finale est un no-op (cohérent).
+     */
     if (tx_count == 0) {
         ESP_LOGD(TAG, "Aucune TX à synchroniser");
+        *last_sync_ts = newest_ts;
         return;
     }
 
@@ -681,6 +770,22 @@ void lora_sync_task(void *param)
     lora_sync_config_t *config = (lora_sync_config_t *)param;
     if (!config) {
         ESP_LOGE(TAG, "Config NULL, tâche terminée");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /*
+     * [F-LS-008] get_time est OBLIGATOIRE : il fournit l'horloge
+     * monotonique utilisée par lora_frag_expire/lora_frag_receive
+     * pour le timeout de réassemblage des fragments (10 s par défaut).
+     * Sans cette fonction, current_time vaut 0 partout, le calcul
+     * `current_time - ctx->start_time` reste perpétuellement < TIMEOUT,
+     * et un contexte de réassemblage interrompu reste bloqué
+     * `active=true` indéfiniment jusqu'à l'arrivée d'un seq_id
+     * différent — un seul fragment orphelin paralyse le réassembleur.
+     */
+    if (!config->get_time) {
+        ESP_LOGE(TAG, "Config invalide : get_time obligatoire (F-LS-008)");
         vTaskDelete(NULL);
         return;
     }

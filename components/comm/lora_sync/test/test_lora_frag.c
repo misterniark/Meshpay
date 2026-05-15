@@ -86,14 +86,38 @@ TEST_CASE("frag_split_two", "[lora_frag]")
  */
 TEST_CASE("frag_split_too_large", "[lora_frag]")
 {
-    /* 16 * 251 + 1 = 4017 octets — dépasse la limite */
-    uint8_t data[4017];
+    /* 16 * 251 + 1 = 4017 octets — dépasse la limite.
+     * [F-LS-007] Static : (a) zero-init automatique élimine le faux
+     * positif -Wmaybe-uninitialized que GCC émet sur un buffer non
+     * initialisé passé par pointeur, (b) libère 4 Ko de pile de test. */
+    static uint8_t data[4017];
     uint8_t packets[LORA_FRAG_MAX_FRAGMENTS][LORA_FRAG_PACKET_MAX];
     size_t packet_lens[LORA_FRAG_MAX_FRAGMENTS];
     uint8_t count = 0;
 
     TEST_ASSERT_EQUAL(-1, lora_frag_split(data, 4017, 0,
                                            packets, packet_lens, &count));
+}
+
+/**
+ * Test [F-LS-009] : data_len == 0 doit être rejeté.
+ *
+ * Avant le fix, lora_frag_split forçait count à 1 et émettait un
+ * paquet vide (header seul, 4 octets). Comportement plus clair :
+ * un appelant qui passe data_len == 0 a fait une erreur de
+ * programmation et doit être détecté immédiatement.
+ */
+TEST_CASE("frag_split_empty_data_rejected", "[lora_frag]")
+{
+    uint8_t data[1] = { 0 };
+    uint8_t packets[LORA_FRAG_MAX_FRAGMENTS][LORA_FRAG_PACKET_MAX];
+    size_t packet_lens[LORA_FRAG_MAX_FRAGMENTS];
+    uint8_t count = 42; /* sentinel pour detecter une ecriture */
+
+    TEST_ASSERT_EQUAL(-1, lora_frag_split(data, 0, 0,
+                                           packets, packet_lens, &count));
+    /* count ne doit pas avoir ete touche apres le rejet */
+    TEST_ASSERT_EQUAL(42, count);
 }
 
 /* ================================================================

@@ -7,15 +7,18 @@
  * testable independamment. Le verrouillage (portMUX) reste dans
  * le module appelant (espnow.c).
  *
- * Capacite (audit Lot B, contrainte par la marge RAM disponible) :
- *   - NONCE_CACHE_SIZE = 48 entrees (~192 octets RAM).
- *   - Couvre ~1 s de memoire au rate-limit global ESP-NOW (50 msg/s),
- *     soit ~1.5x l'ancienne taille (32). Les cibles plus larges
- *     (64, 128) faisaient deborder le segment DRAM disponible — la
- *     marge a ete reduite pour rester compatible avec le reste du
- *     firmware (lvgl, wifi, mbedtls).
- *   - Pour une mitigation plus large, il faudra liberer de la RAM
- *     ailleurs (sdkconfig, buffers lvgl) puis remonter cette valeur.
+ * Capacite (audit 2026-05-15 [F-EN-003]) :
+ *   - NONCE_CACHE_SIZE = 128 entrees (~512 octets RAM).
+ *   - Couvre ~2.6 s de memoire au rate-limit global ESP-NOW
+ *     (50 msg/s). Augmente depuis 48 entrees (~1 s) pour reduire
+ *     la fenetre de rejeu exploitable.
+ *   - Historiquement (mai 2026), 64 puis 48 entrees etaient le max
+ *     tolere par la marge DRAM. Revalide a 128 apres optimisations
+ *     intermediaires. Si un build futur echoue avec linker
+ *     "section .dram0.bss will not fit in region dram0_0_seg",
+ *     revenir a 64 (encore +33% de couverture vs 48).
+ *   - Pour une mitigation plus large (~5 s, 256 entrees, 1 Ko),
+ *     liberer de la RAM ailleurs en priorite (buffers LVGL).
  *
  * Eviction (audit Lot B) :
  *   - Le buffer est circulaire : la plus ancienne entree est ecrasee.
@@ -38,8 +41,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/** Taille du cache circulaire de nonces. Couvre ~1 s a rate-limit max. */
-#define NONCE_CACHE_SIZE 48
+/** Taille du cache circulaire de nonces. Couvre ~2.6 s a rate-limit max.
+ *  [F-EN-003] Augmente de 48 a 128 le 2026-05-15. */
+#define NONCE_CACHE_SIZE 128
 
 /** Structure du cache de nonces */
 typedef struct {

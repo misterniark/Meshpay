@@ -58,7 +58,7 @@ typedef struct {
      * Envoyer un paquet unicast à une adresse MAC spécifique.
      *
      * @param dest_mac Adresse MAC destination (6 octets)
-     * @param data     Données à envoyer (max 250 octets)
+     * @param data     Données à envoyer (max COMM_MSG_ESPNOW_MAX octets (321 en V2))
      * @param len      Taille des données
      * @param ctx      Contexte opaque
      */
@@ -68,7 +68,7 @@ typedef struct {
     /**
      * Envoyer un paquet en broadcast (FF:FF:FF:FF:FF:FF).
      *
-     * @param data Données à envoyer (max 250 octets)
+     * @param data Données à envoyer (max COMM_MSG_ESPNOW_MAX octets (321 en V2))
      * @param len  Taille des données
      * @param ctx  Contexte opaque
      */

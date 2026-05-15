@@ -56,6 +56,18 @@ int comm_msg_pack_announce(uint8_t *buf, size_t buf_len,
         return -1;
     }
 
+    /*
+     * [F-CP-004] alias_len == 0 est LÉGAL ici, contrairement à
+     * pack_set_alias et pack_broadcast qui rejettent une longueur
+     * nulle. Un ANNOUNCE peut être émis par un device en cours
+     * d'initialisation qui n'a pas encore reçu d'alias du maître :
+     * il s'annonce avec sa clé publique seule. Le contrat de l'API
+     * est : alias_len == 0 produit un paquet ANNOUNCE valide sans
+     * texte d'alias (102 octets exactement). Les couches supérieures
+     * qui exigent un alias non-vide doivent valider sémantiquement
+     * en amont. Symétrique de unpack_announce qui accepte aussi 0.
+     */
+
     /* Tronquer l'alias si trop long */
     if (alias_len > COMM_MSG_ALIAS_MAX) {
         alias_len = COMM_MSG_ALIAS_MAX;
@@ -160,6 +172,21 @@ int comm_msg_pack_lora_tx(uint8_t *buf, size_t buf_len,
         return -1;
     }
 
+    /*
+     * [F-CP-001] Garde-fou borne haute : la sortie complète (1 octet
+     * de type + CBOR) doit tenir dans un paquet LoRa physique
+     * (COMM_MSG_LORA_MAX = 255 octets). tx_serialize_full ne connaît
+     * que sa propre contrainte TX_CBOR_MAX_SIZE (320) qui correspond
+     * à la limite ESP-NOW V2 ; sans cette vérification, une TX de
+     * 256-320 octets serait acceptée par le pack puis tronquée ou
+     * rejetée silencieusement par la radio LoRa. La fragmentation
+     * (lora_frag_split) est gérée par lora_sync via lora_tx_packetize
+     * — elle n'utilise pas ce pack mais sérialise directement en CBOR.
+     */
+    if (1 + cbor_len > COMM_MSG_LORA_MAX) {
+        return -1;
+    }
+
     *out_len = 1 + cbor_len;
     return 0;
 }
@@ -177,14 +204,28 @@ int comm_msg_get_type(const uint8_t *buf, size_t buf_len,
 
     uint8_t t = buf[0];
 
-    /* Vérifier que le type est connu */
+    /*
+     * Vérifier que le type est connu.
+     *
+     * [F-CP-002] Cas particulier de COMM_MSG_LORA_FRAG (0x11) : ce
+     * type n'a délibérément PAS de couple comm_msg_pack_frag /
+     * comm_msg_unpack_frag ni de struct comm_msg_frag_t. C'est un
+     * type radio bas-niveau dont le format wire est
+     * [type:1][index:1][total:1][seq_id:1][payload:N] et qui est
+     * géré directement par lora_sync (lora_frag_receive /
+     * lora_frag_split / lora_tx_packetize) sans passer par le
+     * sérialiseur CBOR. Sa présence ici sert uniquement à
+     * permettre au dispatcher d'aiguiller le paquet vers le bon
+     * case dans lora_sync_handle_rx — pas à signaler qu'une
+     * fonction unpack_frag existe côté comm_protocol.
+     */
     switch (t) {
         case COMM_MSG_DISCOVER:
         case COMM_MSG_ANNOUNCE:
         case COMM_MSG_TX_LOCKED:
         case COMM_MSG_TX_ACK:
         case COMM_MSG_LORA_TX:
-        case COMM_MSG_LORA_FRAG:
+        case COMM_MSG_LORA_FRAG: /* type radio bas-niveau, voir commentaire ci-dessus */
         case COMM_MSG_LORA_TIME_SYNC:
         case COMM_MSG_LORA_BROADCAST:
         case COMM_MSG_LORA_PING:
@@ -247,7 +288,14 @@ int comm_msg_unpack_announce(const uint8_t *buf, size_t buf_len,
         return -1;
     }
 
-    /* Copier l'alias et terminer par null */
+    /*
+     * Copier l'alias et terminer par null.
+     * [F-CP-007] Cas alias_len == 0 : memcpy de taille 0 est un no-op
+     * (comportement défini par la norme C99 §7.21.2.1), puis
+     * msg->alias[0] = '\0' pose le terminateur en position 0 — le
+     * buffer renvoyé est donc une chaîne vide valide ("\0"), pas
+     * un buffer non initialisé. Conforme à F-CP-004.
+     */
     memcpy(msg->alias, &buf[offset], msg->alias_len);
     msg->alias[msg->alias_len] = '\0';
     return 0;
@@ -585,6 +633,15 @@ int comm_msg_pack_pong(uint8_t *buf, size_t buf_len,
         return -1;
     }
 
+    /*
+     * [F-CP-005] alias_len == 0 est LÉGAL pour PONG (symétrique
+     * avec pack_announce, cf. F-CP-004) : un device sans alias
+     * répond à un PING avec sa clé publique nue. Le test
+     * pong_roundtrip_empty_alias documente l'intention. Les couches
+     * supérieures qui exigent un alias non-vide (UI de scan,
+     * rename, forward) doivent valider sémantiquement en amont.
+     */
+
     /* Tronquer l'alias si trop long */
     if (alias_len > COMM_MSG_ALIAS_MAX) {
         alias_len = COMM_MSG_ALIAS_MAX;
@@ -643,6 +700,13 @@ int comm_msg_unpack_pong(const uint8_t *buf, size_t buf_len,
         return -1;
     }
 
+    /*
+     * Copier l'alias et terminer par null.
+     * [F-CP-007] Cas alias_len == 0 (légal, cf. F-CP-005) :
+     * memcpy de taille 0 est un no-op et msg->alias[0] = '\0' pose
+     * le terminateur en position 0. Le buffer renvoyé est une chaîne
+     * vide valide.
+     */
     memcpy(msg->alias, &buf[offset], msg->alias_len);
     msg->alias[msg->alias_len] = '\0';
 
@@ -941,5 +1005,20 @@ int comm_msg_verify_set_beneficiary(const comm_msg_set_beneficiary_t *msg)
 
     esp_err_t err = crypto_verify(signed_buf, signed_len,
                                    &msg->master_key, &msg->signature);
+    return (err == ESP_OK) ? 0 : -1;
+}
+
+int comm_msg_verify_attestation(const comm_msg_attestation_t *msg)
+{
+    if (!msg) return -1;
+
+    /*
+     * [F-CP-003] Format signe : [tx_id:32] (cf. comm_msg.h:225-228).
+     * Verifie avec la cle publique de l'attestant (msg->attester_key).
+     * La validation supplementaire "attester_key == tx.to" reste a la
+     * charge de core_task qui a acces au DAG.
+     */
+    esp_err_t err = crypto_verify(msg->tx_id.bytes, CRYPTO_HASH_SIZE,
+                                   &msg->attester_key, &msg->signature);
     return (err == ESP_OK) ? 0 : -1;
 }

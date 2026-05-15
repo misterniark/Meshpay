@@ -29,8 +29,11 @@ if(project_name STREQUAL "meshpay_test_app")
         PRIV_REQUIRES unity
         WHOLE_ARCHIVE
     )
-    target_compile_options(${COMPONENT_LIB} PRIVATE
-        "-Wno-error=maybe-uninitialized")
+    # [F-LS-007 — audit 2026-05-15] -Wno-error=maybe-uninitialized
+    # retiré : les deux faux positifs qui justifiaient sa présence ont
+    # été corrigés (init de result_len dans lora_sync.c, buffer static
+    # dans test_lora_frag.c). On garde -Werror par défaut pour ne plus
+    # masquer d'éventuels vrais warnings.
 else()
     idf_component_register(
         SRCS ${lora_sync_srcs}

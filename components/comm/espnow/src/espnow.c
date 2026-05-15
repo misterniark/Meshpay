@@ -277,6 +277,40 @@ static nonce_cache_t s_nonce_cache;
  */
 static portMUX_TYPE s_nonce_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/*
+ * [F-EN-004] Cache anti-rejeu spécifique aux TX_LOCKED.
+ *
+ * Le format wire d'une TX_LOCKED ne contient pas de nonce dédié :
+ * la transaction porte sa propre id (hash 32 octets). On stocke les
+ * 4 premiers octets de tx.id comme "fingerprint" pour réutiliser
+ * l'infra nonce_cache existante (uint32_t). Probabilité de collision
+ * accidentelle : 1/2³² ≈ 2.3×10⁻¹⁰ — négligeable pour le nombre de
+ * TX échangées en un cycle (qq centaines max). Un attaquant qui
+ * voudrait forger une TX avec une fingerprint coïncidant avec une
+ * TX légitime devrait casser SHA-256 → équivalent à forger la TX
+ * elle-même, qui sera de toute façon rejetée par la validation de
+ * signature dans core_task. La cache absorbe donc les rejeux des
+ * captures réseau sans introduire de nouvelle surface d'attaque.
+ *
+ * Fenêtre effective : ~2.6 s à 50 msg/s (NONCE_CACHE_SIZE = 128).
+ * Au-delà, la pending_tx_table côté émetteur et la déduplication
+ * par tx_id dans le DAG (core_task) restent les filets de sécurité.
+ */
+static nonce_cache_t s_tx_locked_cache;
+static portMUX_TYPE  s_tx_locked_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/**
+ * Helper interne : extraire la fingerprint 32-bit d'un tx_id.
+ * Lit les 4 premiers octets en big-endian (cohérent avec write_u32_be).
+ */
+static inline uint32_t tx_id_fingerprint(const hash_t *tx_id)
+{
+    return ((uint32_t)tx_id->bytes[0] << 24) |
+           ((uint32_t)tx_id->bytes[1] << 16) |
+           ((uint32_t)tx_id->bytes[2] <<  8) |
+           ((uint32_t)tx_id->bytes[3]);
+}
+
 static const char *TAG = "espnow";
 
 /* ================================================================
@@ -309,18 +343,38 @@ static void rx_callback(const uint8_t *src_mac, const uint8_t *data,
      *
      * Le check par-MAC est independant du global — les deux doivent
      * passer pour que le paquet soit accepte.
+     *
+     * [F-EN-002] Les compteurs globaux (s_rx_window_start, s_rx_count)
+     * sont accedes sous le meme spinlock s_rx_rate_mux que le check
+     * par-MAC dans rx_rate_check_and_update. Avant ce fix, les
+     * variables locales static n'etaient pas protegees : sur ESP32
+     * dual-core, deux frames recues simultanement pouvaient (a)
+     * perdre un incrément de s_rx_count, (b) reset la fenetre a mi-
+     * chemin, ou (c) déborder le plafond global sans déclencher le
+     * frein. Le déplacement en variables de module + ENTER/EXIT
+     * autour de la lecture-modification ferme cette race.
      */
     static uint32_t s_rx_window_start = 0;
     static uint8_t  s_rx_count = 0;
 
+    bool global_overflow = false;
+    taskENTER_CRITICAL(&s_rx_rate_mux);
     if ((now_ms - s_rx_window_start) >= RX_RATE_LIMIT_WINDOW_MS) {
         s_rx_window_start = now_ms;
         s_rx_count = 0;
     }
-    s_rx_count++;
+    if (s_rx_count < UINT8_MAX) {
+        s_rx_count++;
+    }
     if (s_rx_count > RX_RATE_LIMIT_GLOBAL) {
+        global_overflow = true;
+    }
+    uint8_t snapshot_count = s_rx_count;
+    taskEXIT_CRITICAL(&s_rx_rate_mux);
+
+    if (global_overflow) {
         ESP_LOGW(TAG, "Rate-limit ESP-NOW global : %u msg/s (plafond=%d)",
-                 s_rx_count, RX_RATE_LIMIT_GLOBAL);
+                 snapshot_count, RX_RATE_LIMIT_GLOBAL);
         return;
     }
 
@@ -426,8 +480,21 @@ void espnow_handle_rx(const espnow_config_t *config,
         /*
          * Un autre device cherche des peers. On répond avec un ANNOUNCE
          * signé contenant notre clé publique, un nonce aléatoire et notre alias.
+         *
+         * [F-EN-009] strnlen au lieu de strlen : own_alias est un
+         * char[33] public dans la struct config. Rien ne garantit
+         * qu'un appelant n'ait pas rempli les 33 octets sans
+         * terminateur null. strlen lirait alors hors-bornes jusqu'a
+         * trouver un \0 dans la mémoire adjacente — au mieux on
+         * obtient un alias_len absurdement grand qui sature a
+         * COMM_MSG_ALIAS_MAX dans pack_announce, au pire on lit
+         * de la donnée sensible. strnlen plafonne à sizeof - 1
+         * pour rester dans le buffer et garantir la null-termination
+         * implicite du résultat (33-1 = 32 = COMM_MSG_ALIAS_MAX).
          */
-        uint8_t alias_len = (uint8_t)strlen(config->own_alias);
+        size_t  alias_len_full = strnlen(config->own_alias,
+                                          sizeof(config->own_alias) - 1);
+        uint8_t alias_len = (uint8_t)alias_len_full;
 
         /* Générer un nonce aléatoire pour l'anti-rejeu */
         uint32_t nonce;
@@ -474,6 +541,37 @@ void espnow_handle_rx(const espnow_config_t *config,
             ESP_LOGW(TAG, "TX_LOCKED malformée");
             return;
         }
+
+        /*
+         * [F-EN-004] Anti-rejeu : si la fingerprint 32-bit du tx_id a
+         * déjà été vue dans la fenêtre récente, c'est un rejeu —
+         * paquet capturé puis ré-émis par un attaquant. Sans cette
+         * vérification, le rejeu remplissait silencieusement
+         * evt_queue (DoS fonctionnel) et risquait un double-traitement
+         * dans core_task. La vérification cryptographique finale reste
+         * faite par core_task (validation signature + déduplication
+         * par tx_id dans le DAG) ; ce filtre est une défense en
+         * profondeur côté couche transport.
+         *
+         * Pattern double-check identique à ANNOUNCE/ACK : vérif sans
+         * lock pour fast-path, puis re-vérif sous lock avant ajout
+         * pour fermer la race entre deux receveurs concurrents.
+         */
+        uint32_t fingerprint = tx_id_fingerprint(&tx.id);
+
+        if (nonce_cache_seen(&s_tx_locked_cache, fingerprint)) {
+            ESP_LOGW(TAG, "TX_LOCKED rejeu detecte (fingerprint=0x%08lx)",
+                     (unsigned long)fingerprint);
+            return;
+        }
+
+        taskENTER_CRITICAL(&s_tx_locked_mux);
+        if (nonce_cache_seen(&s_tx_locked_cache, fingerprint)) {
+            taskEXIT_CRITICAL(&s_tx_locked_mux);
+            return;
+        }
+        nonce_cache_add(&s_tx_locked_cache, fingerprint);
+        taskEXIT_CRITICAL(&s_tx_locked_mux);
 
         evt.type = COMM_EVT_TX_RECEIVED;
         memcpy(&evt.data.tx, &tx, sizeof(transaction_t));
@@ -602,26 +700,48 @@ void espnow_handle_cmd(const espnow_config_t *config,
          * Le core_task demande d'envoyer une TX verrouillée à un peer.
          * On sérialise la TX et on l'envoie en unicast à la MAC indiquée.
          *
-         * [Lot B item 3] Avant l'envoi reseau, on enregistre la TX dans
-         * la table des paiements en attente d'ACK. A reception du TX_ACK,
-         * on verifiera que le signataire de l'ACK est bien la cle tx.to
-         * que nous avons utilisee ici comme destinataire.
+         * [Lot B item 3] Apres l'envoi reseau reussi, on enregistre
+         * la TX dans la table des paiements en attente d'ACK. A
+         * reception du TX_ACK, on verifiera que le signataire de
+         * l'ACK est bien la cle tx.to que nous avons utilisee ici
+         * comme destinataire.
+         *
+         * [F-EN-006] L'enregistrement dans pending_tx_table est fait
+         * APRES hal->send pour ne pas occuper l'unique slot 30 s
+         * si l'envoi reseau echoue (peer hors portee, erreur
+         * esp_now_send). Auparavant, l'ordre inverse bloquait la
+         * table pendant 30 s sur un envoi raté, et un retry depuis
+         * core_task ecrasait l'entree, faisant perdre l'ACK legitime
+         * du premier envoi reussi.
          */
         if (comm_msg_pack_tx_locked(buf, sizeof(buf),
                                     &cmd->data.send_tx.tx,
-                                    &buf_len) == 0) {
-            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            pending_tx_register(&cmd->data.send_tx.tx.id,
-                                &cmd->data.send_tx.tx.to,
-                                now_ms);
-
-            config->hal->send(cmd->data.send_tx.dest_mac, buf, buf_len,
-                              config->hal->ctx);
-            ESP_LOGI(TAG, "TX LOCKED envoyée, montant=%lu",
-                     (unsigned long)cmd->data.send_tx.tx.amount);
-        } else {
+                                    &buf_len) != 0) {
             ESP_LOGE(TAG, "Échec sérialisation TX LOCKED");
+            break;
         }
+
+        hal_err_t send_err = config->hal->send(cmd->data.send_tx.dest_mac,
+                                                buf, buf_len,
+                                                config->hal->ctx);
+        if (send_err != HAL_OK) {
+            ESP_LOGW(TAG, "Echec envoi TX LOCKED reseau : %d "
+                          "(peer hors portee ?)", (int)send_err);
+            /*
+             * On NE PAS register dans pending_tx_table : laisser le
+             * slot libre pour un retry potentiel. core_task peut
+             * detecter le timeout via son propre mecanisme (queue
+             * d'ACK qui ne se remplit pas) et decider de retransmettre.
+             */
+            break;
+        }
+
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        pending_tx_register(&cmd->data.send_tx.tx.id,
+                            &cmd->data.send_tx.tx.to,
+                            now_ms);
+        ESP_LOGI(TAG, "TX LOCKED envoyée, montant=%lu",
+                 (unsigned long)cmd->data.send_tx.tx.amount);
         break;
     }
 

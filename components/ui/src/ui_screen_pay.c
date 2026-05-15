@@ -210,6 +210,26 @@ static lv_obj_t *screen_create(ui_ctx_t *ctx)
     s_ctx = ctx;
     s_peer_selected = false;
 
+    /*
+     * [Audit 2026-05-15] Refresh automatique de la liste des peers
+     * à chaque entrée sur l'écran Payer. Sans ça, l'utilisateur voyait
+     * la liste figée du dernier DISCOVER (potentiellement vide ou
+     * stale) et devait penser à cliquer manuellement sur "Découvrir".
+     *
+     * Le broadcast ANNOUNCE arrive de manière asynchrone (qq centaines
+     * de ms) — l'utilisateur voit d'abord la liste précédente puis
+     * elle se met à jour quand les peers répondent. La file
+     * cmd_queue a un timeout de 100 ms : si elle est pleine, on
+     * laisse tomber silencieusement (le bouton manuel "Découvrir"
+     * reste disponible comme fallback).
+     */
+    if (ctx && ctx->cmd_queue) {
+        ui_cmd_t auto_disc;
+        memset(&auto_disc, 0, sizeof(auto_disc));
+        auto_disc.type = UI_CMD_DISCOVER_PEERS;
+        xQueueSend(ctx->cmd_queue, &auto_disc, pdMS_TO_TICKS(100));
+    }
+
     const bool small = ctx->is_small_screen;
 
     /* ----------------------------------------------------------

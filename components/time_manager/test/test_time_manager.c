@@ -205,9 +205,20 @@ TEST_CASE("master_delta_too_large_rejected", "[time_manager]")
 }
 
 /**
- * Test 7 : Multi-maître — plus petit delta gagne.
+ * Test 7 : Multi-maître — tout maître alternatif est rejeté tant
+ * que le maître courant est valide.
+ *
+ * [F-TM-002] L'ancienne version de ce test (titre "smallest delta
+ * wins") reposait sur une comparaison biaisée dans on_master_sync :
+ * `delta` et `current_master_delta` étaient mathématiquement
+ * identiques, donc tout maître alternatif était de fait rejeté
+ * quel que soit son timestamp. Le test passait par accident parce
+ * qu'il n'envoyait qu'un cas où B était "plus mauvais". Le code
+ * étant désormais explicite ("pas de bascule tant que le maître
+ * courant est valide"), on couvre les deux cas symétriques : B
+ * proche du wall corrigé ET B éloigné, tous deux rejetés.
  */
-TEST_CASE("master_multi_smallest_delta_wins", "[time_manager]")
+TEST_CASE("master_alternative_rejected_while_current_valid", "[time_manager]")
 {
     time_manager_config_t cfg = {
         .mode = TIME_MODE_MASTER,
@@ -220,18 +231,39 @@ TEST_CASE("master_multi_smallest_delta_wins", "[time_manager]")
     make_key(&master_a, 0xAA);
     make_key(&master_b, 0xBB);
 
-    /* Maître A : offset = 100000 - 10000 = 90000 */
+    /* Maître A : adopté en premier — offset = 100000 - 10000 = 90000. */
     time_manager_on_master_sync(&s_tm, &master_a, 100000, 10);
     TEST_ASSERT_TRUE(public_key_equal(&s_tm.current_master_key, &master_a));
 
-    /* Maître B avec un plus grand delta par rapport au temps corrigé actuel */
+    /*
+     * Cas 1 : B avec un delta plus grand que A.
+     * Temps corrigé actuel = 10500 + 90000 = 100500, B dit 105000
+     * → delta = 4500. Doit être rejeté.
+     */
     s_mock_monotonic = 10500;
-    /* Temps corrigé actuel = 10500 + 90000 = 100500 */
-    /* Maître B dit 105000 → delta = |105000 - 100500| = 4500 */
-    /* Maître A dit (implicitement) ~100500 → delta = 0 */
     int ret = time_manager_on_master_sync(&s_tm, &master_b, 105000, 15);
-    /* B a un plus grand delta que A, donc rejeté */
     TEST_ASSERT_EQUAL(-1, ret);
+    TEST_ASSERT_TRUE(public_key_equal(&s_tm.current_master_key, &master_a));
+
+    /*
+     * Cas 2 : B avec un delta nul (timestamp aligné sur wall actuel).
+     * Temps corrigé actuel = 11000 + 90000 = 101000, B dit 101000
+     * → delta = 0. Avant le fix, cas où l'ancienne logique aurait
+     * dû promouvoir B ; désormais B est rejeté de la même façon
+     * pour préserver la stabilité du maître adopté.
+     */
+    s_mock_monotonic = 11000;
+    ret = time_manager_on_master_sync(&s_tm, &master_b, 101000, 20);
+    TEST_ASSERT_EQUAL(-1, ret);
+    TEST_ASSERT_TRUE(public_key_equal(&s_tm.current_master_key, &master_a));
+
+    /*
+     * Cas 3 : un nouveau sync du maître A est toujours accepté.
+     * On ne casse pas le rafraîchissement du maître courant.
+     */
+    s_mock_monotonic = 12000;
+    ret = time_manager_on_master_sync(&s_tm, &master_a, 102000, 25);
+    TEST_ASSERT_EQUAL(0, ret);
     TEST_ASSERT_TRUE(public_key_equal(&s_tm.current_master_key, &master_a));
 }
 

@@ -2,8 +2,12 @@
  * @file test_nonce_cache.c
  * @brief Tests unitaires du cache circulaire de nonces anti-rejeu.
  *
- * Mise a jour audit Lot B : le cache passe a 128 entrees et utilise
- * un compteur `filled` qui ferme le faux-positif sur nonce=0.
+ * Mise a jour audit Lot B : le cache utilise un compteur `filled`
+ * qui ferme le faux-positif sur nonce=0. La taille effective du
+ * cache est definie par NONCE_CACHE_SIZE dans nonce_cache.h (les
+ * tests ci-dessous referencent toujours la constante, jamais une
+ * valeur littérale, pour rester cohérents avec d'éventuels
+ * redimensionnements futurs). [F-EN-007]
  *
  * Utilise le framework Unity (ESP-IDF). Chaque test travaille sur
  * une instance locale s_cache, reinitialisee par setUp() avant

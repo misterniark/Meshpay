@@ -75,7 +75,35 @@ typedef struct {
     time_mode_t       mode;            /* Mode actif */
     time_monotonic_fn get_monotonic;   /* Source monotonique injectée */
 
-    /* Compteur Lamport — maintenu dans les deux modes */
+    /*
+     * Compteur Lamport — maintenu dans les deux modes.
+     *
+     * [F-TM-005] Sémantique de la valeur stockée :
+     *   - En mode LAMPORT pur : compteur séquentiel pur (1, 2, 3…)
+     *     incrémenté à chaque get_tx_timestamp et à chaque on_tx_received.
+     *     Évolue lentement (un point par TX).
+     *   - En mode MASTER avec un maître valide : la garantie de monotonie
+     *     `wall > lamport_counter → lamport_counter = wall` (cf.
+     *     time_manager.c get_tx_timestamp) fait sauter ce compteur à des
+     *     valeurs de l'ordre du wall-clock — typiquement 10⁹+ millisecondes
+     *     en production avec un RTC, ou la valeur monotonique uptime du
+     *     maître. À partir de ce moment, lamport_counter ne représente plus
+     *     un index séquentiel mais une **borne basse de monotonie globale**
+     *     sur l'horloge consensuelle.
+     *   - En cas de fallback Lamport après timeout d'un maître précédent,
+     *     le compteur reste à sa dernière valeur élevée (jamais décroissant)
+     *     et continue d'être incrémenté en pas de 1 par TX. Il n'y a pas
+     *     de "reset" automatique.
+     *
+     * Implication pour les logs : un saut soudain du Lamport de "42" à
+     * "1.7×10¹²" n'est pas un bug, c'est l'adoption du wall-clock maître.
+     * Saturation théorique uint64_t : ~5×10⁸ ans en millisecondes — non
+     * atteinte en pratique.
+     *
+     * Implication pour la (dé)sérialisation : tx.timestamp est un uint64_t
+     * qui doit pouvoir refléter ces deux gammes de valeurs sans perte
+     * (CBOR uint encode automatiquement jusqu'à 64 bits).
+     */
     uint64_t          lamport_counter;
 
     /* Synchronisation maître (Mode MASTER uniquement) */

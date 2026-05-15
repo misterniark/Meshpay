@@ -46,8 +46,38 @@ typedef enum {
 } comm_msg_type_t;
 
 /* Tailles maximales des messages */
-#define COMM_MSG_ESPNOW_MAX   250  /* Limite ESP-NOW */
-#define COMM_MSG_LORA_MAX     255  /* Limite LoRa */
+/*
+ * [F-EN-001 / Lot E.1bis] ESP-NOW V2 (ESP-IDF 5.x) supporte jusqu'à
+ * 1470 octets de payload, bien au-delà des 250 octets de V1. On
+ * dimensionne la limite à 1 octet de type + 320 octets CBOR
+ * (TX_CBOR_MAX_SIZE) pour permettre d'envoyer une transaction
+ * complète en un seul paquet sans fragmentation.
+ *
+ * Avant ce fix, le buffer interne d'espnow_handle_cmd était plafonné
+ * à 250 octets : toute TX sérialisée > 249 octets CBOR (deux parents
+ * renseignés ou seq non-nul) provoquait l'échec silencieux de
+ * comm_msg_pack_tx_locked() et l'abandon du paiement côté émetteur.
+ *
+ * La constante littérale (321) évite une dépendance circulaire vers
+ * transaction/tx_serialize.h depuis comm_protocol. Si TX_CBOR_MAX_SIZE
+ * évolue, mettre à jour ici également et vérifier la garde HAL dans
+ * espnow_hal_esp32.c.
+ */
+#define COMM_MSG_ESPNOW_MAX   321  /* 1 octet type + TX_CBOR_MAX_SIZE (320) */
+
+/*
+ * [F-CP-006] COMM_MSG_LORA_MAX : limite physique d'un paquet LoRa
+ * unique (modulation SX1262, charge utile par trame). C'est une
+ * contrainte radio délibérément conservatrice : on s'aligne sur
+ * 255 octets, valeur maximale acceptée par la majorité des SF/BW
+ * supportés par le firmware (cf. components/device_hal/include/
+ * lora_hal.h). Les TX dont la sérialisation CBOR dépasse cette
+ * borne sont fragmentées par lora_sync (lora_frag_split,
+ * LORA_FRAG_PAYLOAD_MAX = 251 octets utiles par fragment) puis
+ * réassemblées côté récepteur. Les helpers comm_msg_pack_lora_tx
+ * et comm_msg_pack_broadcast doivent rester sous cette limite.
+ */
+#define COMM_MSG_LORA_MAX     255  /* Limite radio LoRa par paquet (fragmentation au-delà) */
 #define COMM_MSG_ALIAS_MAX     32  /* Alias device max */
 
 /* ================================================================
@@ -688,5 +718,19 @@ int comm_msg_verify_set_alias(const comm_msg_set_alias_t *msg);
  * @return 0 si signature valide, -1 sinon
  */
 int comm_msg_verify_set_beneficiary(const comm_msg_set_beneficiary_t *msg);
+
+/**
+ * [F-CP-003] Verifier la signature Ed25519 d'un message LORA_ATTESTATION
+ * decode. Couvre [tx_id:32], signe par msg->attester_key.
+ *
+ * Symmetrique aux trois autres comm_msg_verify_* : permet a la couche
+ * LoRa de filtrer les attestations forgees AVANT de poster un evenement
+ * vers core_task (defense en profondeur). La validation finale "attester
+ * == tx.to" reste a la charge de core_task qui a acces au DAG.
+ *
+ * @param msg Message decode (attester_key, signature, tx_id)
+ * @return 0 si signature valide, -1 sinon
+ */
+int comm_msg_verify_attestation(const comm_msg_attestation_t *msg);
 
 #endif /* COMM_MSG_H */

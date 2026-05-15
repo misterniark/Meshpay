@@ -10,6 +10,7 @@
  */
 
 #include "espnow_hal_mock.h"
+#include "comm/comm_msg.h"  /* COMM_MSG_ESPNOW_MAX */
 #include <string.h>
 
 /** Nombre max de paquets stockés dans l'historique d'envoi */
@@ -18,7 +19,7 @@
 /** Paquet stocké dans l'historique */
 typedef struct {
     uint8_t dest_mac[6];
-    uint8_t data[250];
+    uint8_t data[COMM_MSG_ESPNOW_MAX];
     size_t  len;
     bool    used;
 } mock_sent_packet_t;
@@ -57,7 +58,8 @@ static hal_err_t mock_deinit(void *ctx)
 static hal_err_t mock_send(const uint8_t *dest_mac, const uint8_t *data,
                             size_t len, void *ctx)
 {
-    if (!dest_mac || !data || len == 0 || len > 250) {
+    /* [F-EN-001] Aligné sur COMM_MSG_ESPNOW_MAX (321) — V2 ESP-NOW. */
+    if (!dest_mac || !data || len == 0 || len > COMM_MSG_ESPNOW_MAX) {
         return HAL_ERR_INVALID;
     }
 

@@ -26,13 +26,21 @@ int lora_frag_split(const uint8_t *data, size_t data_len,
         return -1;
     }
 
+    /*
+     * [F-LS-009] Rejeter data_len == 0 plutôt que de produire un
+     * fragment vide. Sans cette garde, count valait 0 puis était
+     * forcé à 1, et un paquet LoRa de 4 octets (header seul) était
+     * émis pour rien. Le récepteur l'aurait passé à tx_deserialize
+     * sur un buffer vide → erreur silencieuse. Comportement plus
+     * clair : un appelant qui passe data_len == 0 a fait une erreur
+     * de programmation et doit être détecté immédiatement.
+     */
+    if (data_len == 0) {
+        return -1;
+    }
+
     /* Calculer le nombre de fragments nécessaires */
     uint8_t count = (uint8_t)((data_len + LORA_FRAG_PAYLOAD_MAX - 1) / LORA_FRAG_PAYLOAD_MAX);
-
-    /* Au minimum 1 fragment, même pour des données vides */
-    if (count == 0) {
-        count = 1;
-    }
 
     /* Vérifier la limite de fragments */
     if (count > LORA_FRAG_MAX_FRAGMENTS) {
@@ -117,10 +125,34 @@ bool lora_frag_receive(lora_frag_ctx_t *ctx,
         return false;
     }
 
+    /*
+     * [F-LS-010] Garde-fou explicite contre total_fragments > 16 :
+     * 1UL << 16 déborde sur uint16_t après cast et le résultat est
+     * implémentation-spécifique (fonctionne par accident sur GCC/ESP32
+     * via wrap-around 0x10000 → 0x0000 puis underflow 0x0000-1 = 0xFFFF).
+     * On exige strictement total ≤ LORA_FRAG_MAX_FRAGMENTS pour rester
+     * dans le domaine défini par la norme C. La condition total ==
+     * ctx->total_fragments (ligne ci-dessus) couvre le cas où total
+     * a été validé avant, mais on conserve l'assert pour défense en
+     * profondeur si la struct est corrompue.
+     */
+    if (ctx->total_fragments == 0 ||
+        ctx->total_fragments > LORA_FRAG_MAX_FRAGMENTS) {
+        return false;
+    }
+
+    /*
+     * Calcul du masque "tous fragments reçus" : on utilise (1UL <<
+     * total) - 1UL pour rester en uint32_t pendant le shift, ce qui
+     * est portable jusqu'à total = 31. Le cast final en uint16_t est
+     * sûr car LORA_FRAG_MAX_FRAGMENTS ≤ 16.
+     */
+    const uint16_t complete_mask =
+        (uint16_t)((1UL << ctx->total_fragments) - 1UL);
+
     /* Ignorer les doublons (fragment déjà reçu) */
-    if (ctx->received_mask & (1u << frag_index)) {
+    if (ctx->received_mask & (uint16_t)(1UL << frag_index)) {
         /* Fragment déjà reçu, vérifier si complet */
-        uint16_t complete_mask = (uint16_t)((1u << ctx->total_fragments) - 1);
         return (ctx->received_mask == complete_mask);
     }
 
@@ -130,10 +162,9 @@ bool lora_frag_receive(lora_frag_ctx_t *ctx,
     ctx->fragment_lens[frag_index] = payload_len;
 
     /* Marquer ce fragment comme reçu */
-    ctx->received_mask |= (1u << frag_index);
+    ctx->received_mask |= (uint16_t)(1UL << frag_index);
 
     /* Vérifier si tous les fragments sont reçus */
-    uint16_t complete_mask = (uint16_t)((1u << ctx->total_fragments) - 1);
     return (ctx->received_mask == complete_mask);
 }
 
@@ -149,7 +180,13 @@ int lora_frag_get_result(const lora_frag_ctx_t *ctx,
     if (!ctx->active) {
         return -1;
     }
-    uint16_t complete_mask = (uint16_t)((1u << ctx->total_fragments) - 1);
+    /* [F-LS-010] Mêmes garde-fous que dans lora_frag_receive. */
+    if (ctx->total_fragments == 0 ||
+        ctx->total_fragments > LORA_FRAG_MAX_FRAGMENTS) {
+        return -1;
+    }
+    const uint16_t complete_mask =
+        (uint16_t)((1UL << ctx->total_fragments) - 1UL);
     if (ctx->received_mask != complete_mask) {
         return -1;
     }

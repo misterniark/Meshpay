@@ -11,6 +11,7 @@
  */
 
 #include "comm/espnow_hal.h"
+#include "comm/comm_msg.h"  /* COMM_MSG_ESPNOW_MAX */
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -81,10 +82,32 @@ static hal_err_t esp32_init(void *ctx)
 
     /*
      * Initialiser le Wi-Fi en mode STA (requis pour ESP-NOW).
-     * Si le Wi-Fi est déjà initialisé, ces appels sont idempotents.
+     *
+     * [F-EN-010] CONTRAT : cette HAL gère l'init Wi-Fi de manière
+     * autonome pour rester self-contained sur les firmwares qui
+     * n'utilisent que ESP-NOW. Si le firmware appelant gère le Wi-Fi
+     * lui-même (provisioning, OTA, AP soft), l'idéal serait de
+     * déplacer ces appels dans `app_main` avant de monter la HAL.
+     * Tant que cette refactorisation n'est pas faite, on protège
+     * chaque init contre la double-instanciation :
+     *
+     * - esp_netif_init()              : idempotente par ESP-IDF.
+     * - esp_event_loop_create_default : tolère ESP_ERR_INVALID_STATE
+     *                                   (déjà créée par un autre comp.)
+     * - esp_wifi_init                 : tolère ESP_ERR_WIFI_INIT_STATE.
+     * - esp_wifi_set_mode/start       : tolèrent les états "déjà
+     *                                   démarré" via le check ci-dessous.
+     *
+     * [F-EN-005] Auparavant, ESP_ERROR_CHECK(esp_event_loop_create_default())
+     * provoquait un crash garanti si la boucle d'événements existait déjà.
      */
     ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    esp_err_t evt_err = esp_event_loop_create_default();
+    if (evt_err != ESP_OK && evt_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "esp_event_loop_create_default échoué : 0x%x", evt_err);
+        return HAL_FAIL;
+    }
 
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&wifi_cfg);
@@ -93,8 +116,22 @@ static hal_err_t esp32_init(void *ctx)
         return HAL_FAIL;
     }
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    /*
+     * [F-EN-010] esp_wifi_set_mode et esp_wifi_start peuvent échouer
+     * si le Wi-Fi est déjà dans l'état demandé (autre composant l'a
+     * démarré). On tolère ces codes d'erreur explicitement plutôt que
+     * d'abort() via ESP_ERROR_CHECK.
+     */
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_mode(STA) : 0x%x (déjà en mode STA ?)", err);
+    }
+
+    err = esp_wifi_start();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
+        ESP_LOGE(TAG, "esp_wifi_start échoué : 0x%x", err);
+        return HAL_FAIL;
+    }
 
     /*
      * Fixer explicitement le canal Wi-Fi apres esp_wifi_start().
@@ -148,6 +185,19 @@ static hal_err_t esp32_init(void *ctx)
 static hal_err_t esp32_deinit(void *ctx)
 {
     (void)ctx;
+
+    /*
+     * [F-EN-008] Avant esp_now_deinit, désenregistrer explicitement
+     * le callback ESP-IDF et invalider rx_cb. Sans ces étapes, un
+     * appel résiduel à esp_now_recv_cb après deinit (queue interne
+     * ESP-IDF, ISR latente) tomberait sur un pointeur de callback
+     * périmé pointant vers du code potentiellement déchargé →
+     * crash difficile à diagnostiquer.
+     */
+    esp_now_unregister_recv_cb();
+    s_ctx.rx_cb       = NULL;
+    s_ctx.rx_user_ctx = NULL;
+
     esp_now_deinit();
     s_ctx.initialized = false;
     return HAL_OK;
@@ -157,7 +207,14 @@ static hal_err_t esp32_send(const uint8_t *dest_mac, const uint8_t *data,
                              size_t len, void *ctx)
 {
     (void)ctx;
-    if (!dest_mac || !data || len == 0 || len > 250) {
+    /*
+     * [F-EN-001 / Lot E.1bis] La limite ESP-NOW V1 était de 250 octets ;
+     * ESP-NOW V2 (ESP-IDF 5.x) accepte jusqu'à 1470 octets. On aligne
+     * la garde sur COMM_MSG_ESPNOW_MAX (321 = 1 octet type + 320 CBOR)
+     * pour permettre l'envoi des TX_LOCKED les plus grosses sans
+     * fragmentation. Toute valeur au-delà reste rejetée comme garde-fou.
+     */
+    if (!dest_mac || !data || len == 0 || len > COMM_MSG_ESPNOW_MAX) {
         return HAL_ERR_INVALID;
     }
 
