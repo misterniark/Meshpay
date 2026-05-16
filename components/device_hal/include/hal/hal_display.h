@@ -91,12 +91,30 @@ typedef struct {
     hal_err_t (*get_resolution)(uint16_t *width, uint16_t *height, void *ctx);
 
     /**
-     * [F-HW-010] Mettre l'écran en veille avant un deep sleep système.
+     * [F-HW-010] Mettre l'écran en veille pour économiser la batterie.
      *
-     * Coupe le rétroéclairage (équivalent set_backlight=0) ET envoie
+     * Coupe le rétroéclairage (équivalent `set_backlight(0)`) ET envoie
      * la commande SLPIN au contrôleur LCD pour minimiser la
-     * consommation. Sur batterie, sans cet appel le contrôleur reste
-     * actif et consomme inutilement.
+     * consommation. Sans cet appel, le contrôleur reste actif et
+     * consomme inutilement.
+     *
+     * ⚠️ Périmètre limité — cet appel ne couvre QUE le sous-système
+     * écran. Il ne touche pas au tactile (qui reste sur son bus SPI/I2C)
+     * et ne configure aucun wake-source. En particulier :
+     *
+     * - **Light sleep système** : le tactile continue de fonctionner
+     *   naturellement (CPU + périphs alimentés), une IRQ tactile
+     *   réveillera l'ESP32 sans configuration supplémentaire.
+     * - **Deep sleep système** : seul le RTC reste actif. Pour
+     *   réveiller le device sur un toucher, la couche `power_manager`
+     *   doit configurer la pin IRQ tactile comme RTC GPIO via
+     *   `esp_sleep_enable_ext0_wakeup(touch_irq_pin, 0)`. Ce HAL ne le
+     *   fait PAS — c'est volontaire pour ne pas coupler `hal_display`
+     *   à la stratégie de power management.
+     *
+     * Au wake (depuis quelque source que ce soit), l'appelant doit
+     * appeler `init()` à nouveau ou un futur `wake()` pour envoyer
+     * SLPOUT et restaurer le backlight.
      *
      * Peut être NULL pour les drivers qui ne supportent pas la veille
      * (mock, futurs drivers). L'appelant doit vérifier avant d'invoquer.
