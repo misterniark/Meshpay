@@ -299,22 +299,31 @@ ui_pin_result_t ui_pin_verify(const uint8_t pin[UI_PIN_LENGTH],
         int64_t last_fail = read_fail_time(storage);
         int64_t now = esp_timer_get_time(); /* microsecondes, monotone depuis boot */
 
-        /* [Fix B4] esp_timer_get_time() repart a zero apres un reboot,
-           alors que last_fail est persiste en NVS et peut provenir d'une
-           session anterieure ou now etait beaucoup plus eleve. Sans cette
-           garde, now - last_fail est negatif, elapsed_s < required_delay
-           est toujours vrai, et le cooldown ne s'expire jamais : device
-           verrouille indefiniment. On considere le cooldown ecoule. */
         if (now < last_fail) {
+            /*
+             * [F-UI-007] Décision design 2026-05-16 : `now < last_fail`
+             * indique un reboot (esp_timer repart à zéro). On PÉNALISE
+             * le reboot en redémarrant le cooldown complet, au lieu de
+             * le considérer expiré (ancien fix B4).
+             *
+             * Justification : sans cette pénalité, un attaquant pouvait
+             * bypasser le délai anti brute-force de 30 s en rebootant
+             * physiquement le device après 3 essais. Avec ce fix, le
+             * reboot écrase `last_fail` avec le nouveau `now` et le
+             * cooldown complet recommence — pénalité légère pour
+             * l'utilisateur légitime qui reboot par erreur, bloquante
+             * pour l'attaquant.
+             */
             ESP_LOGW(TAG, "Timestamp NVS posterieur a esp_timer (reboot ?) — "
-                          "cooldown considere expire");
-        } else {
-            int64_t elapsed_s = (now - last_fail) / 1000000;
-            if (elapsed_s < (int64_t)required_delay) {
-                ESP_LOGW(TAG, "Cooldown actif: %"PRId64"s restantes",
-                         (int64_t)required_delay - elapsed_s);
-                return UI_PIN_COOLDOWN;
-            }
+                          "redemarrage du cooldown complet (anti bypass)");
+            write_fail_time(storage, now);
+            return UI_PIN_COOLDOWN;
+        }
+        int64_t elapsed_s = (now - last_fail) / 1000000;
+        if (elapsed_s < (int64_t)required_delay) {
+            ESP_LOGW(TAG, "Cooldown actif: %"PRId64"s restantes",
+                     (int64_t)required_delay - elapsed_s);
+            return UI_PIN_COOLDOWN;
         }
     }
 
@@ -406,8 +415,18 @@ lv_obj_t *ui_pin_show(lv_obj_t *parent, const char *title,
                        ui_pin_callback_t callback, void *user_data,
                        bool is_small)
 {
-    /* Fermer un eventuel overlay precedent */
-    ui_pin_close();
+    /*
+     * [F-UI-004] Garde contre la réentrance : si un overlay est déjà
+     * ouvert, on retourne le même handle sans en créer un second.
+     * Sans cette garde, un double tap rapide sur "Admin" pouvait
+     * appeler ui_pin_show deux fois ; le second appel `memset` les
+     * singletons statiques `s_numpad_ctx` / `s_ledger_ctx` et créait
+     * des dangling pointers vers des widgets LVGL détruits → crash
+     * ou perte silencieuse de la saisie.
+     */
+    if (s_pin_overlay != NULL) {
+        return s_pin_overlay;
+    }
 
     if (is_small) {
         s_pin_overlay = ui_pin_ledger_create(parent, title, callback, user_data);

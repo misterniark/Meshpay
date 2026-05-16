@@ -90,6 +90,22 @@ typedef struct {
      */
     hal_err_t (*get_resolution)(uint16_t *width, uint16_t *height, void *ctx);
 
+    /**
+     * [F-HW-010] Mettre l'écran en veille avant un deep sleep système.
+     *
+     * Coupe le rétroéclairage (équivalent set_backlight=0) ET envoie
+     * la commande SLPIN au contrôleur LCD pour minimiser la
+     * consommation. Sur batterie, sans cet appel le contrôleur reste
+     * actif et consomme inutilement.
+     *
+     * Peut être NULL pour les drivers qui ne supportent pas la veille
+     * (mock, futurs drivers). L'appelant doit vérifier avant d'invoquer.
+     *
+     * @param ctx Contexte opaque
+     * @return HAL_OK en cas de succès
+     */
+    hal_err_t (*sleep)(void *ctx);
+
     /** Contexte opaque de l'implémentation */
     void *ctx;
 } hal_display_t;

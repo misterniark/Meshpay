@@ -62,6 +62,16 @@ bool core1262_map_config(const hal_lora_config_t *cfg,
     out->pkt.invert_iq_is_on      = false;
 
     /* --- Frequence : passe-plat. --- */
+    /*
+     * [F-HW-009] Validation des bornes du SX1262 (300-960 MHz).
+     * Décision design 2026-05-16 : check au niveau HAL pour rejeter
+     * les valeurs aberrantes (0, > 1 GHz). La conformité réglementaire
+     * (EU868 863-870 MHz, US915, etc.) reste à la charge de la couche
+     * applicative.
+     */
+    if (cfg->frequency_hz < 300000000UL || cfg->frequency_hz > 960000000UL) {
+        return false;
+    }
     out->freq_hz = cfg->frequency_hz;
 
     /* --- Puissance : bornee a la plage du SX1262. --- */

@@ -18,6 +18,7 @@
 #include "ui/ui_state.h"
 #include "ui/ui_theme.h"
 #include "ui/ui_manager.h"
+#include "ui/ui_pin.h"
 
 #include "dag/dag.h"
 #include "crypto/crypto_types.h"
@@ -72,6 +73,39 @@ static void admin_err_timer_cb(lv_timer_t *timer)
  * Verifie que le device est un maitre (mint_authority) avant
  * d'autoriser l'acces. Affiche un message d'erreur si non autorise.
  */
+/*
+ * [F-UI-001] Callback de vérification du PIN avant accès à l'écran
+ * Admin. Sans cette garde, n'importe qui ayant emprunté un device
+ * maître quelques secondes pouvait accéder aux écrans Mint, Broadcast,
+ * Forward (création monétaire arbitraire, diffusion de message).
+ */
+static void admin_pin_cb(const uint8_t pin[UI_PIN_LENGTH], void *user_data)
+{
+    ui_ctx_t *ctx = (ui_ctx_t *)user_data;
+    ui_pin_close();
+    if (!ctx || !ctx->storage) return;
+
+    ui_pin_result_t res = ui_pin_verify(pin, ctx->storage);
+    if (res == UI_PIN_OK) {
+        ui_manager_show(UI_SCREEN_ADMIN);
+    } else {
+        if (s_lbl_admin_err) {
+            const char *msg = (res == UI_PIN_BLOCKED)
+                                ? "Trop de tentatives"
+                                : (res == UI_PIN_COOLDOWN)
+                                    ? "Patientez..."
+                                    : "PIN incorrect";
+            lv_label_set_text(s_lbl_admin_err, msg);
+            lv_obj_clear_flag(s_lbl_admin_err, LV_OBJ_FLAG_HIDDEN);
+            if (s_admin_err_timer) {
+                lv_timer_delete(s_admin_err_timer);
+            }
+            s_admin_err_timer = lv_timer_create(admin_err_timer_cb, 2000, NULL);
+            lv_timer_set_repeat_count(s_admin_err_timer, 1);
+        }
+    }
+}
+
 static void admin_cb(lv_event_t *e)
 {
     ui_ctx_t *ctx = (ui_ctx_t *)lv_event_get_user_data(e);
@@ -91,7 +125,17 @@ static void admin_cb(lv_event_t *e)
         return;
     }
 
-    ui_manager_show(UI_SCREEN_ADMIN);
+    /*
+     * [F-UI-001] Demander la saisie du PIN avant la navigation. Le
+     * callback vérifie le PIN et ne navigue que si UI_PIN_OK.
+     * Si aucun PIN n'est configuré (premier boot, setup pas encore
+     * fait), on accepte directement pour ne pas bloquer le bootstrap.
+     */
+    if (ctx->storage && ui_pin_is_configured(ctx->storage)) {
+        ui_pin_show(NULL, "PIN admin", admin_pin_cb, ctx, ctx->is_small_screen);
+    } else {
+        ui_manager_show(UI_SCREEN_ADMIN);
+    }
 }
 
 /* ================================================================

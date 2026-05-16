@@ -80,6 +80,7 @@ typedef struct {
     hal_lora_rx_cb_t rx_cb;          /**< Callback de reception */
     void            *rx_user_ctx;    /**< Contexte utilisateur du callback */
     SemaphoreHandle_t uart_mutex;    /**< Mutex pour l'acces UART serie */
+    SemaphoreHandle_t rx_stop_sem;   /**< [F-HW-003] Synchro fin de tache RX */
     TaskHandle_t     rx_task_handle; /**< Handle de la tache de reception */
     int16_t          last_rssi;      /**< Dernier RSSI recu */
 } wio_e5_ctx_t;
@@ -151,8 +152,14 @@ static hal_err_t send_at_cmd(wio_e5_ctx_t *ctx, const char *cmd,
                         return HAL_OK;
                     }
 
-                    /* Verifier les erreurs AT */
-                    if (strstr(buf, "+AT: ERROR") || strstr(buf, "ERROR")) {
+                    /*
+                     * [F-HW-004] Détection d'erreur restreinte au
+                     * préfixe AT strict (`+AT: ERROR`). L'ancienne
+                     * détection générique `strstr("ERROR")` provoquait
+                     * de faux positifs si un autre fragment contenait
+                     * le mot.
+                     */
+                    if (strstr(buf, "+AT: ERROR")) {
                         ESP_LOGW(TAG, "Erreur AT: %s", buf);
                         return HAL_FAIL;
                     }
@@ -347,6 +354,14 @@ static void wio_rx_task(void *param)
     }
 
     ESP_LOGI(TAG, "Tache RX arretee");
+    /*
+     * [F-HW-003] Signaler la terminaison effective avant l'auto-delete
+     * pour que `wio_sleep` puisse attendre proprement (sémaphore au
+     * lieu de timing aveugle).
+     */
+    if (ctx->rx_stop_sem) {
+        xSemaphoreGive(ctx->rx_stop_sem);
+    }
     vTaskDelete(NULL);
 }
 
@@ -585,6 +600,27 @@ static hal_err_t wio_start_rx(void *ctx_ptr)
         return HAL_OK;
     }
 
+    /*
+     * [F-HW-011] Envoyer AT+TEST=RXLRPKT AVANT de démarrer la tâche RX.
+     * Sans cet ordre, la tâche commençait à lire l'UART avant que le
+     * module soit en mode RX et capturait la réponse AT au lieu de
+     * `send_at_cmd`.
+     */
+    if (xSemaphoreTake(ctx->uart_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        send_at_cmd(ctx, "AT+TEST=RXLRPKT", NULL, 0, "+TEST: RXLRPKT",
+                    WIO_AT_TIMEOUT_MS);
+        xSemaphoreGive(ctx->uart_mutex);
+    }
+
+    /* [F-HW-003] Sémaphore de fin alloué une seule fois (binaire). */
+    if (ctx->rx_stop_sem == NULL) {
+        ctx->rx_stop_sem = xSemaphoreCreateBinary();
+        if (!ctx->rx_stop_sem) {
+            ESP_LOGE(TAG, "start_rx: rx_stop_sem non alloue");
+            return HAL_ERR_NO_MEM;
+        }
+    }
+
     /* Lancer la tache de reception */
     ctx->rx_running = true;
     BaseType_t ret = xTaskCreate(wio_rx_task, "wio_rx", WIO_RX_TASK_STACK,
@@ -593,13 +629,6 @@ static hal_err_t wio_start_rx(void *ctx_ptr)
         ESP_LOGE(TAG, "Creation tache RX echouee");
         ctx->rx_running = false;
         return HAL_FAIL;
-    }
-
-    /* Envoyer la commande pour passer en mode RX continu */
-    if (xSemaphoreTake(ctx->uart_mutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
-        send_at_cmd(ctx, "AT+TEST=RXLRPKT", NULL, 0, "+TEST: RXLRPKT",
-                    WIO_AT_TIMEOUT_MS);
-        xSemaphoreGive(ctx->uart_mutex);
     }
 
     ESP_LOGI(TAG, "Mode reception active");
@@ -620,11 +649,21 @@ static hal_err_t wio_sleep(void *ctx_ptr)
         return HAL_OK;  /* Rien a faire */
     }
 
-    /* Arreter la tache RX si elle tourne */
+    /*
+     * [F-HW-003] Arrêt synchronisé de la tâche RX via sémaphore.
+     * Avant : `vTaskDelay(200 ms)` aveugle, insuffisant si la tâche
+     * boucle sur `uart_read_bytes(timeout=100ms)`.
+     */
     if (ctx->rx_running) {
         ctx->rx_running = false;
-        /* Attendre que la tache se termine */
-        vTaskDelay(pdMS_TO_TICKS(200));
+        if (ctx->rx_stop_sem) {
+            if (xSemaphoreTake(ctx->rx_stop_sem, pdMS_TO_TICKS(1000)) != pdTRUE) {
+                ESP_LOGW(TAG, "sleep : tache RX n'a pas signale sa terminaison");
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(400));
+        }
+        ctx->rx_task_handle = NULL;
     }
 
     /* Envoyer la commande de mise en veille */

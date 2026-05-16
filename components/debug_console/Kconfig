@@ -51,12 +51,19 @@ menu "Mesh Pay debug console"
     config MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE
         int "Max length of a debug input/output line (bytes)"
         depends on MESHPAY_DEBUG_CONSOLE
-        default 384
+        default 512
         help
             Taille du buffer ligne utilise pour parser une commande
-            entrante et pour formater une ligne JSON sortante. 384
-            couvre la plus grosse ligne TX serialisee (id + from + to
-             + parents en hex = ~300 caracteres).
+            entrante et pour formater une ligne JSON sortante.
+
+            [F-DC-001] Calcul du pire cas (DAG TX TRANSFER, 2 parents,
+            valeurs max) :
+              {"i":249,"id":<64>,"type":"TRANSFER","from":<64>,
+               "to":<64>,"amount":4294967295,"currency":4294967295,
+               "fee":4294967295,"seq":4294967295,"status":"CONFIRMED",
+               "ts":18446744073709551615,"parents":["<64>","<64>"]}
+            = 497 caracteres + \0 = 498 octets.
+            512 laisse 14 octets de marge.
 
     config MESHPAY_DEBUG_CONSOLE_MUTEX_TIMEOUT_MS
         int "Mutex acquisition timeout in dumps (ms)"

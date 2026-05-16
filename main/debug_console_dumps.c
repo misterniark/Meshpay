@@ -10,8 +10,15 @@
  * Mono-thread garanti : tous les callbacks sont appeles en sequence
  * par la meme tache dbg_console.
  *
- * Compile uniquement quand `CONFIG_MESHPAY_DEBUG_CONSOLE=y` (cf. CMakeLists).
+ * [F-DC-004] Compile uniquement quand `CONFIG_MESHPAY_DEBUG_CONSOLE=y`.
+ * Garde-fou au niveau source (en plus du CMake) pour qu'un système de
+ * build alternatif (Unity host-based, CI cross direct) ne puisse pas
+ * inclure ce fichier sans la garde.
  */
+
+#include "sdkconfig.h"
+
+#if CONFIG_MESHPAY_DEBUG_CONSOLE
 
 #include "debug_console_dumps.h"
 
@@ -30,8 +37,16 @@ static const char *TAG = "dbg_dumps";
 /*
  * Taille du buffer ligne. Alloue sur la stack (la DRAM est saturee,
  * dette technique connue, ~60 octets de marge en .bss).
+ *
+ * [F-DC-001] Assertion compile-time : la valeur Kconfig doit couvrir
+ * le pire cas calculé (TX DAG TRANSFER avec 2 parents) = 497 octets +
+ * \0. Sans cette garantie, le dump JSON est silencieusement tronqué
+ * pour les TX à 2 parents (cas normal après genesis).
  */
 #define DBG_LINE_SIZE CONFIG_MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE
+_Static_assert(DBG_LINE_SIZE >= 512,
+               "[F-DC-001] CONFIG_MESHPAY_DEBUG_CONSOLE_LINE_BUF_SIZE doit "
+               "etre >= 512 pour couvrir le pire cas dump DAG (2 parents)");
 
 static inline void dbg_hex(const uint8_t *src, size_t len,
                            char *dst, size_t dst_size)
@@ -96,16 +111,41 @@ static void dump_dag(debug_console_writer_fn writer, void *ctx)
                          dbg_status_name(tx->status),
                          (unsigned long long)tx->timestamp);
 
-        for (uint8_t p = 0; p < tx->parent_count && n > 0 && n < (int)sizeof(line); p++) {
+        /*
+         * [F-DC-002] Garde normalisée : snprintf retourne le nombre de
+         * caractères qui AURAIENT été écrits sans troncature. Si
+         * `n >= sizeof(line)`, le buffer est plein (troncature). On
+         * traite ce cas explicitement en émettant un objet d'erreur
+         * plutôt qu'un JSON incomplet.
+         */
+        if (n <= 0 || n >= (int)sizeof(line)) {
+            writer("{\"err\":\"line_truncated\"}", ctx);
+            continue;
+        }
+
+        for (uint8_t p = 0; p < tx->parent_count; p++) {
             dbg_hex(tx->parents[p].bytes, sizeof(tx->parents[p].bytes),
                     parent_hex, sizeof(parent_hex));
-            n += snprintf(line + n, sizeof(line) - n,
-                          "%s\"%s\"", p > 0 ? "," : "", parent_hex);
+            int rem = (int)sizeof(line) - n;
+            int written = snprintf(line + n, (size_t)rem,
+                                   "%s\"%s\"", p > 0 ? "," : "", parent_hex);
+            if (written <= 0 || written >= rem) {
+                /* Troncature pendant l'écriture des parents : abandon. */
+                writer("{\"err\":\"line_truncated\"}", ctx);
+                n = -1;
+                break;
+            }
+            n += written;
         }
-        if (n > 0 && n < (int)sizeof(line)) {
-            snprintf(line + n, sizeof(line) - n, "]}");
+        if (n > 0) {
+            int rem = (int)sizeof(line) - n;
+            int written = snprintf(line + n, (size_t)rem, "]}");
+            if (written > 0 && written < rem) {
+                writer(line, ctx);
+            } else {
+                writer("{\"err\":\"line_truncated\"}", ctx);
+            }
         }
-        writer(line, ctx);
     }
 
     xSemaphoreGive(s_state_mutex);
@@ -123,11 +163,21 @@ static void dump_wallet(debug_console_writer_fn writer, void *ctx)
         return;
     }
 
+    /*
+     * [F-DC-003] On vérifie le retour pour logger un warning si erreur.
+     * Le mutex reste détenu après l'appel ; en cas d'erreur, on
+     * continue avec balance = 0 plutôt que de laisser le retour en
+     * (void) qui masquerait silencieusement le problème.
+     */
     uint32_t balance = 0;
-    (void)wallet_get_balance_for(&s_dag, &s_checkpoint,
-                                  &s_keypair.public_key,
-                                  &s_wallet.fee_recipient,
-                                  &balance);
+    esp_err_t bal_err = wallet_get_balance_for(&s_dag, &s_checkpoint,
+                                                &s_keypair.public_key,
+                                                &s_wallet.fee_recipient,
+                                                &balance);
+    if (bal_err != ESP_OK) {
+        ESP_LOGW(TAG, "wallet_get_balance_for err=0x%x, balance=0 dans le dump",
+                 (int)bal_err);
+    }
 
     char own_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
     char fee_hex[CRYPTO_PUBLIC_KEY_SIZE * 2 + 1];
@@ -270,3 +320,5 @@ void debug_console_register_dumps(void)
                       "dump_currency, dump_time, dump_all)");
     }
 }
+
+#endif /* CONFIG_MESHPAY_DEBUG_CONSOLE — [F-DC-004] garde source-level */

@@ -67,6 +67,17 @@ static void feedback_timer_cb(lv_timer_t *timer)
  * Recupere le destinataire selectionne et le montant, puis poste
  * la commande dans la queue sans prendre le mutex.
  */
+/*
+ * [F-UI-003] TODO Lot UI dédié : confirmation à 2 clics via `lv_msgbox`.
+ * Décision design 2026-05-16 : dialog modal affichant montant +
+ * destinataire avec boutons Confirmer/Annuler. Implémentation reportée
+ * pour ne pas introduire un composant LVGL custom hâtivement.
+ *
+ * En attendant : `is_master` filtre l'accès à l'écran (cf. F-UI-005) et
+ * l'écran Settings exige le PIN (cf. F-UI-001), donc le risque
+ * d'appui accidentel reste circonscrit aux situations où l'utilisateur
+ * a déjà authentifié son rôle de maître.
+ */
 static void create_cb(lv_event_t *e)
 {
     ui_ctx_t *ctx = (ui_ctx_t *)lv_event_get_user_data(e);
@@ -212,6 +223,17 @@ static uint32_t build_dest_options(ui_ctx_t *ctx, char *buf, size_t size)
 
 static lv_obj_t *screen_create(ui_ctx_t *ctx)
 {
+    /*
+     * [F-UI-005] Défense en profondeur : refuser la création de l'écran
+     * MINT si le device n'est pas maître. L'écran Settings filtre déjà
+     * l'accès, mais ce check protège contre toute navigation alternative
+     * (pile de navigation manipulée, débogage, futur deeplink).
+     */
+    if (!ctx || !ctx->is_master) {
+        ui_manager_back();
+        return NULL;
+    }
+
     s_screen = lv_obj_create(NULL);
     lv_obj_add_style(s_screen, &ui_style_screen, 0);
 

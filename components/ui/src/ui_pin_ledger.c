@@ -178,15 +178,19 @@ lv_obj_t *ui_pin_ledger_create(lv_obj_t *parent, const char *title,
     lv_obj_set_style_border_width(ctrl_row, 0, 0);
     lv_obj_set_style_pad_all(ctrl_row, 0, 0);
 
-    /* Bouton UP (fleche gauche = decrementer) */
-    lv_obj_t *btn_down = lv_button_create(ctrl_row);
-    lv_obj_set_size(btn_down, 70, 50);
-    lv_obj_add_style(btn_down, &ui_style_btn, 0);
-    lv_obj_add_event_cb(btn_down, ledger_down_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_down = lv_label_create(btn_down);
-    lv_label_set_text(lbl_down, LV_SYMBOL_LEFT);
-    lv_obj_set_style_text_font(lbl_down, ui_theme_font_amount(), 0);
-    lv_obj_center(lbl_down);
+    /*
+     * [F-UI-013] Bouton DECREMENT (flèche gauche). Anciennement nommé
+     * `btn_down` avec commentaire "Bouton UP" — confusion résolue :
+     * la flèche gauche décrémente le chiffre courant.
+     */
+    lv_obj_t *btn_decrement = lv_button_create(ctrl_row);
+    lv_obj_set_size(btn_decrement, 70, 50);
+    lv_obj_add_style(btn_decrement, &ui_style_btn, 0);
+    lv_obj_add_event_cb(btn_decrement, ledger_down_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_decrement = lv_label_create(btn_decrement);
+    lv_label_set_text(lbl_decrement, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(lbl_decrement, ui_theme_font_amount(), 0);
+    lv_obj_center(lbl_decrement);
 
     /* Grand chiffre central */
     s_ledger_ctx.current_digit_label = lv_label_create(ctrl_row);
@@ -196,15 +200,18 @@ lv_obj_t *ui_pin_ledger_create(lv_obj_t *parent, const char *title,
                                  UI_COLOR_ACCENT, 0);
     lv_label_set_text(s_ledger_ctx.current_digit_label, "0");
 
-    /* Bouton DOWN (fleche droite = incrementer) */
-    lv_obj_t *btn_up = lv_button_create(ctrl_row);
-    lv_obj_set_size(btn_up, 70, 50);
-    lv_obj_add_style(btn_up, &ui_style_btn, 0);
-    lv_obj_add_event_cb(btn_up, ledger_up_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_up = lv_label_create(btn_up);
-    lv_label_set_text(lbl_up, LV_SYMBOL_RIGHT);
-    lv_obj_set_style_text_font(lbl_up, ui_theme_font_amount(), 0);
-    lv_obj_center(lbl_up);
+    /*
+     * [F-UI-013] Bouton INCREMENT (flèche droite). Anciennement nommé
+     * `btn_up` avec commentaire "Bouton DOWN" — confusion résolue.
+     */
+    lv_obj_t *btn_increment = lv_button_create(ctrl_row);
+    lv_obj_set_size(btn_increment, 70, 50);
+    lv_obj_add_style(btn_increment, &ui_style_btn, 0);
+    lv_obj_add_event_cb(btn_increment, ledger_up_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_increment = lv_label_create(btn_increment);
+    lv_label_set_text(lbl_increment, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_font(lbl_increment, ui_theme_font_amount(), 0);
+    lv_obj_center(lbl_increment);
 
     /* Bouton de validation en bas */
     lv_obj_t *btn_ok = lv_button_create(overlay);

@@ -310,10 +310,20 @@ static void execute(debug_cmd_t cmd)
             break;
 
         case DEBUG_CMD_DUMP_ALL:
+            /*
+             * [F-DC-006] `dump_all` est désormais englobé dans une
+             * paire BEGIN/END `dump_all` avec un `seq` unique. Les
+             * sous-dumps gardent leurs propres marqueurs internes pour
+             * permettre au parseur d'identifier chaque section, mais
+             * la commande compte pour un seul `seq` côté moniteur.
+             */
+            s_state.seq++;
+            write_begin("dump_all", s_state.seq);
             dispatch_dump(DEBUG_CMD_DUMP_DAG,      s_state.cbs.dump_dag);
             dispatch_dump(DEBUG_CMD_DUMP_WALLET,   s_state.cbs.dump_wallet);
             dispatch_dump(DEBUG_CMD_DUMP_CURRENCY, s_state.cbs.dump_currency);
             dispatch_dump(DEBUG_CMD_DUMP_TIME,     s_state.cbs.dump_time);
+            write_end("dump_all");
             break;
 
         case DEBUG_CMD_UNKNOWN:

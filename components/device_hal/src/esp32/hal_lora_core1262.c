@@ -88,6 +88,7 @@ typedef struct {
 
     SemaphoreHandle_t       radio_mutex;  /**< Serialise les acces radio */
     SemaphoreHandle_t       dio1_sem;     /**< Donne par l'ISR DIO1 (RX_DONE) */
+    SemaphoreHandle_t       rx_stop_sem;  /**< [F-HW-002] Donne par la tache RX juste avant vTaskDelete(NULL). Permet a `sleep` d'attendre la terminaison effective sans timing aveugle. */
     TaskHandle_t            rx_task_handle;
 } core1262_ctx_t;
 
@@ -279,6 +280,14 @@ static void c1262_rx_task(void *param)
     }
 
     ESP_LOGI(TAG, "Tache RX arretee");
+    /*
+     * [F-HW-002] Signaler la terminaison effective avant l'auto-delete
+     * pour que `c1262_sleep` puisse attendre proprement (sémaphore au
+     * lieu de timing aveugle).
+     */
+    if (ctx->rx_stop_sem) {
+        xSemaphoreGive(ctx->rx_stop_sem);
+    }
     vTaskDelete(NULL);
 }
 
@@ -514,8 +523,19 @@ static hal_err_t c1262_set_rx_callback(hal_lora_rx_cb_t cb, void *user_ctx,
                                        void *ctx_ptr)
 {
     core1262_ctx_t *ctx = (core1262_ctx_t *)ctx_ptr;
+    /*
+     * [F-HW-008] Prendre le mutex radio pour sérialiser avec la
+     * lecture concurrente de `rx_cb` par `rx_task`. Sur Xtensa
+     * l'écriture d'un pointeur 32 bits est atomique en pratique mais
+     * pas garantie par le standard C11. Le mutex assure aussi la
+     * cohérence de la paire (cb, user_ctx).
+     */
+    if (xSemaphoreTake(ctx->radio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return HAL_ERR_BUSY;
+    }
     ctx->rx_cb       = cb;
     ctx->rx_user_ctx = user_ctx;
+    xSemaphoreGive(ctx->radio_mutex);
     return HAL_OK;
 }
 
@@ -527,6 +547,31 @@ static hal_err_t c1262_start_rx(void *ctx_ptr)
     if (!ctx->rx_cb)       return HAL_ERR_INVALID;
     if (ctx->rx_running)   return HAL_OK;
 
+    /*
+     * [F-HW-001] Ordre corrigé : on arme d'abord le SX1262 en mode RX
+     * (sous mutex), puis on crée la tâche RX, et on ne positionne
+     * `rx_running = true` qu'en tout dernier. Sans cet ordre, la tâche
+     * RX pouvait démarrer sur l'autre cœur et tenter de servir des
+     * IRQ DIO1 avant que le radio soit armé.
+     */
+    if (xSemaphoreTake(ctx->radio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "start_rx : impossible d'armer la reception (mutex indisponible)");
+        return HAL_ERR_BUSY;
+    }
+    rf_switch_rx(ctx);
+    sx126x_set_rx_with_timeout_in_rtc_step(&ctx->hw, SX126X_RX_CONTINUOUS);
+    xSemaphoreGive(ctx->radio_mutex);
+
+    /* [F-HW-002] Sémaphore de fin de tâche réinitialisé (binaire) :
+     * recréer pour absorber un éventuel give précédent. */
+    if (ctx->rx_stop_sem == NULL) {
+        ctx->rx_stop_sem = xSemaphoreCreateBinary();
+        if (!ctx->rx_stop_sem) {
+            ESP_LOGE(TAG, "start_rx : rx_stop_sem non alloue");
+            return HAL_ERR_NO_MEM;
+        }
+    }
+
     ctx->rx_running = true;
 
     BaseType_t ok = xTaskCreate(c1262_rx_task, "c1262_rx", C1262_RX_TASK_STACK,
@@ -536,18 +581,6 @@ static hal_err_t c1262_start_rx(void *ctx_ptr)
         ESP_LOGE(TAG, "Creation tache RX echouee");
         return HAL_ERR_NO_MEM;
     }
-
-    /* Lancer la reception continue. */
-    if (xSemaphoreTake(ctx->radio_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGE(TAG, "start_rx : impossible d'armer la reception (mutex indisponible)");
-        ctx->rx_running = false;
-        vTaskDelete(ctx->rx_task_handle);
-        ctx->rx_task_handle = NULL;
-        return HAL_ERR_BUSY;
-    }
-    rf_switch_rx(ctx);
-    sx126x_set_rx_with_timeout_in_rtc_step(&ctx->hw, SX126X_RX_CONTINUOUS);
-    xSemaphoreGive(ctx->radio_mutex);
 
     ESP_LOGI(TAG, "Mode reception active");
     return HAL_OK;
@@ -559,10 +592,35 @@ static hal_err_t c1262_sleep(void *ctx_ptr)
 
     if (!ctx->initialized) return HAL_OK;
 
-    /* Arreter la tache RX. */
+    /*
+     * [F-HW-002] Arrêt synchronisé de la tâche RX via sémaphore.
+     *
+     * Avant ce fix, on attendait 600 ms aveuglément après avoir mis
+     * `rx_running = false`. Si la tâche tenait le mutex pendant le
+     * traitement d'un paquet, 600 ms pouvaient ne pas suffire et le
+     * SX1262 se retrouvait en standby pendant que la tâche zombie
+     * accédait encore au registre.
+     *
+     * Maintenant : la tâche fait `xSemaphoreGive(rx_stop_sem)` juste
+     * avant `vTaskDelete(NULL)`. On attend ce signal avec un timeout
+     * généreux (2 s) qui couvre tous les cas réels.
+     */
     if (ctx->rx_running) {
         ctx->rx_running = false;
-        vTaskDelay(pdMS_TO_TICKS(600));   /* laisser la tache sortir de sa boucle */
+        /* Réveiller la tâche RX si elle dort sur dio1_sem. */
+        if (ctx->dio1_sem) {
+            xSemaphoreGive(ctx->dio1_sem);
+        }
+        if (ctx->rx_stop_sem) {
+            if (xSemaphoreTake(ctx->rx_stop_sem, pdMS_TO_TICKS(2000)) != pdTRUE) {
+                ESP_LOGW(TAG, "sleep : tache RX n'a pas signale sa terminaison "
+                              "dans le delai imparti");
+            }
+        } else {
+            /* Fallback historique si le sémaphore n'a pas pu être alloué. */
+            vTaskDelay(pdMS_TO_TICKS(600));
+        }
+        ctx->rx_task_handle = NULL;
     }
 
     /* Mettre le SX1262 en standby basse conso. */
@@ -584,6 +642,17 @@ hal_err_t hal_lora_core1262_create(hal_lora_t *lora,
 {
     if (!lora || !pins) {
         return HAL_ERR_INVALID;
+    }
+
+    /*
+     * [F-HW-018] Garde explicite contre les appels multiples : le HAL
+     * Core1262 utilise un singleton statique (`s_ctx`). Un second
+     * `create()` écraserait silencieusement l'instance précédente avec
+     * `memset`. On retourne maintenant HAL_ERR_BUSY pour signaler
+     * l'erreur d'usage.
+     */
+    if (s_ctx.initialized) {
+        return HAL_ERR_BUSY;
     }
 
     memset(&s_ctx, 0, sizeof(s_ctx));

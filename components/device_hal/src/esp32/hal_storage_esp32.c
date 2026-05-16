@@ -76,6 +76,16 @@ static hal_err_t esp32_u32_read(const char *ns, const char *key,
                                 uint32_t *value, void *ctx)
 {
     (void)ctx;
+    /*
+     * [F-HW-015] Check NULL explicite : `nvs_get_u32(_, _, NULL)`
+     * provoquerait une corruption mémoire en NVS interne. Aussi, ns/key
+     * NULL retournent INVALID_ARG via nvs_open mais on les bloque ici
+     * pour fail-fast.
+     */
+    if (!ns || !key || !value) {
+        return HAL_ERR_INVALID;
+    }
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(ns, NVS_READONLY, &handle);
     if (err != ESP_OK) {
@@ -171,22 +181,24 @@ static hal_err_t esp32_exists(const char *ns, const char *key,
     }
 
     /*
-     * Astuce : tenter de lire la taille d'un blob avec un buffer NULL.
-     * Si la clé existe (quel que soit le type), NVS retourne OK ou
-     * une erreur de type. On tente d'abord u32 puis blob.
+     * [F-HW-006] On tente u32 puis blob. `ESP_ERR_NVS_TYPE_MISMATCH`
+     * indique que la clé existe mais avec un type différent (i32, str,
+     * etc.). On considère ce cas comme `exists = true` au lieu de
+     * faux négatif. Pour Mesh Pay, le HAL gère uniquement u32 et blob,
+     * mais cette robustesse couvre tout autre usage NVS éventuel.
      */
     uint32_t dummy_u32;
     err = nvs_get_u32(handle, key, &dummy_u32);
-    if (err == ESP_OK) {
+    if (err == ESP_OK || err == ESP_ERR_NVS_TYPE_MISMATCH) {
         *exists_out = true;
         nvs_close(handle);
         return HAL_OK;
     }
 
-    /* Tenter comme blob */
+    /* Tenter comme blob — idem pour TYPE_MISMATCH. */
     size_t dummy_len = 0;
     err = nvs_get_blob(handle, key, NULL, &dummy_len);
-    *exists_out = (err == ESP_OK);
+    *exists_out = (err == ESP_OK || err == ESP_ERR_NVS_TYPE_MISMATCH);
     nvs_close(handle);
     return HAL_OK;
 }
@@ -216,9 +228,21 @@ hal_err_t hal_storage_esp32_create(hal_storage_t *storage)
 
         if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
             err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            ESP_LOGW(TAG, "NVS corrompu, effacement et réinit...");
-            ESP_ERROR_CHECK(nvs_flash_erase());
-            err = nvs_flash_init();
+            /*
+             * [F-HW-005] NVS corrompue : on signale l'erreur à
+             * l'application au lieu d'effacer silencieusement les
+             * données critiques (clé privée Ed25519, config, compteurs).
+             * L'app décidera de la politique (effacement explicite avec
+             * alerte UI, ou refus de boot pour forcer un reflash).
+             *
+             * Avant ce fix, `ESP_ERROR_CHECK(nvs_flash_erase())` pouvait
+             * provoquer un `abort()` si l'effacement échouait — perte
+             * irréversible sans diagnostic possible.
+             */
+            ESP_LOGE(TAG, "NVS corrompue (err=0x%x) — refus init pour "
+                          "preserver les donnees existantes. L'app doit "
+                          "decider de la politique de recovery.", err);
+            return HAL_ERR_IO;
         }
 
         if (err != ESP_OK) {

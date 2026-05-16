@@ -86,7 +86,12 @@ static const char *TAG = "hal_display_ili9341";
 #define ILI9341_CMD_CASET     0x2A  /* Column Address Set */
 #define ILI9341_CMD_PASET     0x2B  /* Page Address Set */
 #define ILI9341_CMD_RAMWR     0x2C  /* Memory Write */
-#define ILI9341_CMD_MADCTL    0x3A  /* Pixel Format Set — en fait c'est COLMOD */
+/*
+ * [F-HW-016] L'ancien doublon `ILI9341_CMD_MADCTL = 0x3A` (qui était
+ * en réalité COLMOD à cause d'un mauvais nommage historique) a été
+ * supprimé. La constante correcte pour MADCTL est `ILI9341_CMD_MADCTL_R`
+ * = 0x36. Ne pas réintroduire le doublon.
+ */
 #define ILI9341_CMD_COLMOD    0x3A  /* Interface Pixel Format */
 #define ILI9341_CMD_MADCTL_R  0x36  /* Memory Access Control (orientation) */
 #define ILI9341_CMD_PWCTR1    0xC0  /* Power Control 1 */
