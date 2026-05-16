@@ -842,10 +842,20 @@ void lora_sync_task(void *param)
     /* Boucle principale */
     for (;;) {
         /* Effectuer un cycle de synchronisation */
+        /*
+         * [F-LS-008] Trace l'enchainement do_cycle → start_rx → delay
+         * pour diagnostiquer un WDT historique survenant juste apres
+         * un cycle LoRa (Interrupt WDT timeout on CPU0 dans
+         * espnow_task). Si le firmware crashe entre ces logs, on
+         * saura quelle phase a tenu les interrupts trop longtemps.
+         */
+        ESP_LOGI(TAG, "Cycle: debut do_cycle");
         lora_sync_do_cycle(config, &last_sync_ts);
+        ESP_LOGI(TAG, "Cycle: fin do_cycle, appel start_rx...");
 
         /* Retourner en mode réception */
-        config->lora->start_rx(config->lora->ctx);
+        hal_err_t rx_err = config->lora->start_rx(config->lora->ctx);
+        ESP_LOGI(TAG, "Cycle: start_rx retourne %d, sleep avant prochain cycle", (int)rx_err);
 
         /*
          * Dormir jusqu'au prochain cycle. Délai aléatoire dans

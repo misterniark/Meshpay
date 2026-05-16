@@ -44,6 +44,28 @@ static const char *TAG = "tport_lora";
 static hal_lora_t s_lora_hal;
 
 /*
+ * Flag de disponibilite LoRa.
+ *
+ * [F-LT-001] Avant ce flag, `transport_lora_available()` retournait
+ * `true` inconditionnellement et `transport_lora_send()` appelait
+ * `s_lora_hal.send(...)` sans verifier que la HAL avait ete cree avec
+ * succes. Si `hal_lora_create_default()` echouait au boot (cf.
+ * `transport_lora_init_and_start()` qui ne fait que logger un warning),
+ * `s_lora_hal.send` restait NULL (BSS) et le premier appel a
+ * `transport_lora_send` (typiquement l'attestation du premier paiement
+ * recu) provoquait un crash NULL-deref (Guru Meditation
+ * InstrFetchProhibited) sur les deux devices.
+ *
+ * `s_lora_ready` n'est passe a `true` que lorsque la HAL est creee ET
+ * que `lora_sync_task` est spawne avec succes. La validation finale du
+ * chip SX1262 (reset, check ID, IRQ) reste interne au driver via
+ * `c1262_init`, qui tourne dans la task LoRa : la garde
+ * `s_lora_hal.send != NULL` (assuree par `s_lora_ready`) suffit pour
+ * eliminer le crash de pointeur.
+ */
+static bool s_lora_ready = false;
+
+/*
  * Buffers de relay/pong (precedemment dans app_state.{h,c}).
  *
  * [F-MN-001] Tous les relais (broadcast, ping, pong) suivent désormais
@@ -142,7 +164,14 @@ static uint32_t lora_collect_confirmed_txs(uint64_t       since_ts,
 
 bool transport_lora_available(void)
 {
-    return true;
+    /*
+     * [F-LT-001] Reflete l'etat reel du sous-systeme LoRa. Auparavant
+     * retournait `true` en dur, ce qui faisait croire a tous les
+     * callers que la HAL etait initialisee meme si `create()` avait
+     * echoue. Maintenant les callers (handler_payment, etc.) peuvent
+     * fiablement skipper le LoRa quand il n'est pas dispo.
+     */
+    return s_lora_ready;
 }
 
 hal_err_t transport_lora_init_and_start(void)
@@ -150,7 +179,8 @@ hal_err_t transport_lora_init_and_start(void)
     /* 1. HAL physique — le driver concret est choisi par Kconfig. */
     hal_err_t err = hal_lora_create_default(&s_lora_hal);
     if (err != HAL_OK) {
-        ESP_LOGW(TAG, "HAL LoRa init echoue (%d) — fonctionnement sans LoRa", err);
+        ESP_LOGE(TAG, "HAL LoRa create echoue (%d) — LoRa desactive, "
+                      "attestations et sync periodique skipees", err);
         return err;
     }
 
@@ -173,13 +203,38 @@ hal_err_t transport_lora_init_and_start(void)
     s_lora_cfg.own_keypair            = &s_keypair;
     s_lora_cfg.get_lamport            = lora_get_lamport;
 
-    xTaskCreate(lora_sync_task, "lora", LORA_TASK_STACK, &s_lora_cfg,
-                LORA_TASK_PRIO, NULL);
+    BaseType_t ok = xTaskCreate(lora_sync_task, "lora", LORA_TASK_STACK,
+                                &s_lora_cfg, LORA_TASK_PRIO, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "xTaskCreate(lora_sync_task) echoue — LoRa desactive");
+        return HAL_ERR_NO_MEM;
+    }
+
+    /*
+     * [F-LT-001] La HAL a ete cree et la task est spawnee : le pointeur
+     * `s_lora_hal.send` est garanti non-NULL (set par
+     * hal_lora_core1262_create). Le chip lui-meme sera initialise par
+     * `c1262_init` dans la task LoRa ; tant que `s_ctx.initialized`
+     * n'est pas vrai, `c1262_send` retournera HAL_FAIL proprement
+     * (cf. hal_lora_core1262.c:449), donc pas de crash.
+     */
+    s_lora_ready = true;
     return HAL_OK;
 }
 
 bool transport_lora_send(const uint8_t *buf, size_t len, const char *what)
 {
+    /*
+     * [F-LT-001] Garde anti-NULL-deref : si `s_lora_ready` est faux,
+     * `s_lora_hal.send` peut etre NULL (echec de create()) et l'appel
+     * provoquerait un crash. On loggue en DEBUG seulement pour eviter
+     * de spammer les logs en cas de paiement repete sur device sans
+     * LoRa fonctionnel.
+     */
+    if (!s_lora_ready) {
+        ESP_LOGD(TAG, "send (%s) skip : LoRa non pret", what ? what : "?");
+        return false;
+    }
     hal_err_t herr = s_lora_hal.send(buf, len, s_lora_hal.ctx);
     if (herr != HAL_OK) {
         ESP_LOGW(TAG, "Echec envoi LoRa (%s): %d", what ? what : "?", herr);
@@ -227,6 +282,16 @@ void transport_lora_queue_pong_delayed(const uint8_t *buf, size_t len,
 
 void transport_lora_pump(void)
 {
+    /*
+     * [F-LT-001] Si la HAL LoRa n'a pas pu etre initialisee, pas la
+     * peine de scruter les buffers : ils ne se rempliront pas (les
+     * callers utilisent transport_lora_available() en garde), et meme
+     * s'ils etaient remplis, transport_lora_send() les rejetterait.
+     */
+    if (!s_lora_ready) {
+        return;
+    }
+
     /*
      * [F-MN-001] Relay broadcast LoRa — scrutation non-bloquante.
      * Le délai anti-collision (200-1000 ms) a été enregistré à l'appel

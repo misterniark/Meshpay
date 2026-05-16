@@ -49,12 +49,25 @@ esp_err_t dag_merge_transaction(dag_t *dag, const transaction_t *tx,
 
     /* Étape 1 : vérification structurelle (sans lock). */
     if (tx_validate_structure(tx) != ESP_OK) {
+        /*
+         * [F-DG-022] Loguer pourquoi le merge a echoue pour permettre
+         * un diagnostic rapide en banc sans recompiler avec
+         * ESP_LOGD active. Champs clefs uniquement (pas le pubkey
+         * complet ni le hash : on ne veut pas spammer le log INFO
+         * en cas de rejets en serie).
+         */
+        ESP_LOGW(TAG, "merge rejete (structure invalide): type=%d amount=%"PRIu32
+                      " parent_count=%u from[0]=0x%02x to[0]=0x%02x",
+                 (int)tx->type, tx->amount, (unsigned)tx->parent_count,
+                 tx->from.bytes[0], tx->to.bytes[0]);
         *result = DAG_MERGE_REJECTED;
         return ESP_ERR_INVALID_ARG;
     }
 
     /* Étape 2 : vérification du hash et de la signature Ed25519 (sans lock). */
     if (tx_validate_signature(tx) != ESP_OK) {
+        ESP_LOGW(TAG, "merge rejete (signature invalide): type=%d from[0]=0x%02x",
+                 (int)tx->type, tx->from.bytes[0]);
         *result = DAG_MERGE_REJECTED;
         return ESP_ERR_INVALID_ARG;
     }
@@ -75,10 +88,14 @@ esp_err_t dag_merge_transaction(dag_t *dag, const transaction_t *tx,
      */
     if (tx->type == TX_TYPE_MINT) {
         if (master_keys == NULL) {
+            ESP_LOGW(TAG, "merge rejete (MINT sans master_keys)");
             *result = DAG_MERGE_REJECTED;
             return ESP_ERR_INVALID_ARG;
         }
         if (tx_validate_master(tx, master_keys) != ESP_OK) {
+            ESP_LOGW(TAG, "merge rejete (MINT non autorise): from[0]=0x%02x "
+                          "master_count=%u",
+                     tx->from.bytes[0], (unsigned)master_keys->count);
             *result = DAG_MERGE_REJECTED;
             return ESP_ERR_INVALID_ARG;
         }

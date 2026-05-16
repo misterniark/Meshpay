@@ -414,7 +414,18 @@ void app_main(void)
 
     /* HAL LoRa + lora_sync_task. Les handles ci-dessus sont maintenant
      * tous valides et lisibles depuis n'importe quel cœur. */
-    (void)transport_lora_init_and_start();
+    /*
+     * [F-LT-001] Capturer le retour : un echec ici signifie que LoRa
+     * sera indisponible (attestation paiement skipee, pas de sync
+     * periodique entre devices hors portee ESP-NOW). Le firmware
+     * continue : ESP-NOW reste fonctionnel pour les peers a portee.
+     */
+    hal_err_t lora_err = transport_lora_init_and_start();
+    if (lora_err != HAL_OK) {
+        ESP_LOGW(TAG, "LoRa indisponible (%d) — fonctionnement en mode "
+                      "ESP-NOW seul ; verifier cablage SX1262 / Kconfig "
+                      "MESHPAY_LORA_C1262_PIN_*", lora_err);
+    }
 
     ESP_LOGI(TAG, "[11/12] HAL initialises (ESP-NOW%s)",
              transport_lora_available() ? " + LoRa" : "");

@@ -306,11 +306,29 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
         return HAL_ERR_INVALID;
     }
 
+    /*
+     * [F-HW-019] Trace de boot detaillee. Le crash historique des deux
+     * ESP32-S3 au paiement (cf. F-LT-001 dans transport_lora.c) etait
+     * cause par un echec silencieux de cette init suivi d'un appel a
+     * `s_lora_hal.send` (NULL). On loggue chaque etape pour qu'au
+     * prochain banc on identifie precisement laquelle echoue : config
+     * map, GPIO control, SPI bus, SPI device, reset chip, radio params,
+     * mutex/sem, ISR.
+     */
+    ESP_LOGI(TAG, "Init Core1262 : SPI%d, NSS=%d MOSI=%d MISO=%d SCK=%d "
+                  "RESET=%d BUSY=%d DIO1=%d RXEN=%d TXEN=%d",
+             ctx->spi_host, ctx->hw.pin_nss, ctx->pin_mosi, ctx->pin_miso,
+             ctx->pin_sck, ctx->hw.pin_reset, ctx->hw.pin_busy,
+             ctx->pin_dio1, ctx->pin_rxen, ctx->pin_txen);
+
     /* 1. Traduire la config HAL en parametres SX1262. */
     if (!core1262_map_config(config, &ctx->params)) {
-        ESP_LOGE(TAG, "Config radio invalide");
+        ESP_LOGE(TAG, "Init etape 1/6 : config radio invalide");
         return HAL_ERR_INVALID;
     }
+    ESP_LOGI(TAG, "Init 1/6 : config mappee (%lu Hz, SF%u, %d dBm)",
+             (unsigned long)ctx->params.freq_hz,
+             (unsigned)ctx->params.mod.sf, (int)ctx->params.power_dbm);
 
     /* 2. GPIO de controle : NSS, RESET, RXEN, TXEN en sortie ; BUSY,
      *    DIO1 en entree. */
@@ -324,7 +342,10 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_DISABLE,
     };
-    if (gpio_config(&out_cfg) != ESP_OK) return HAL_ERR_IO;
+    if (gpio_config(&out_cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "Init 2/6 : gpio_config outputs echoue (NSS/RESET/RXEN/TXEN)");
+        return HAL_ERR_IO;
+    }
     gpio_set_level(ctx->hw.pin_nss, 1);   /* CS au repos = haut */
 
     gpio_config_t busy_cfg = {
@@ -334,7 +355,10 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_DISABLE,
     };
-    if (gpio_config(&busy_cfg) != ESP_OK) return HAL_ERR_IO;
+    if (gpio_config(&busy_cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "Init 2/6 : gpio_config BUSY echoue");
+        return HAL_ERR_IO;
+    }
 
     gpio_config_t dio1_cfg = {
         .pin_bit_mask = (1ULL << ctx->pin_dio1),
@@ -343,7 +367,11 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_POSEDGE,   /* IRQ SX1262 = front montant */
     };
-    if (gpio_config(&dio1_cfg) != ESP_OK) return HAL_ERR_IO;
+    if (gpio_config(&dio1_cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "Init 2/6 : gpio_config DIO1 echoue");
+        return HAL_ERR_IO;
+    }
+    ESP_LOGI(TAG, "Init 2/6 : GPIO control configures (NSS/RESET/RXEN/TXEN/BUSY/DIO1)");
 
     /* 3. Bus + device SPI. CS gere a la main (spics_io_num = -1). */
     spi_bus_config_t bus_cfg = {
@@ -358,9 +386,12 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
      * entrer en concurrence avec le SPI LCD, qui en a besoin pour LVGL. */
     esp_err_t err = spi_bus_initialize(ctx->spi_host, &bus_cfg, SPI_DMA_DISABLED);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "spi_bus_initialize echoue: %d", err);
+        ESP_LOGE(TAG, "Init 3/6 : spi_bus_initialize echoue: %d "
+                      "(SPI%d deja pris ? pins en conflit ?)",
+                 err, ctx->spi_host);
         return HAL_ERR_IO;
     }
+    ESP_LOGI(TAG, "Init 3/6 : SPI%d bus initialise", ctx->spi_host);
 
     spi_device_interface_config_t dev_cfg = {
         .clock_speed_hz = C1262_SPI_CLOCK_HZ,
@@ -370,10 +401,12 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
     };
     err = spi_bus_add_device(ctx->spi_host, &dev_cfg, &ctx->hw.spi);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "spi_bus_add_device echoue: %d", err);
+        ESP_LOGE(TAG, "Init 3/6 : spi_bus_add_device echoue: %d", err);
         spi_bus_free(ctx->spi_host);
         return HAL_ERR_IO;
     }
+    ESP_LOGI(TAG, "Init 3/6 : SPI device ajoute (clock=%d Hz)",
+             C1262_SPI_CLOCK_HZ);
 
     /* rc est utilise par les chemins d'erreur goto pour propager le code
      * d'erreur jusqu'aux labels de nettoyage. Initialise a HAL_ERR_IO
@@ -382,17 +415,24 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
 
     /* 4. Reset materiel du SX1262. */
     if (sx126x_hal_reset(&ctx->hw) != SX126X_HAL_STATUS_OK) {
-        ESP_LOGE(TAG, "Reset SX1262 echoue (BUSY bloque ?)");
+        ESP_LOGE(TAG, "Init 4/6 : reset SX1262 echoue (BUSY=%d toujours "
+                      "haut ? cablage RESET pin %d ?)",
+                 gpio_get_level(ctx->hw.pin_busy), ctx->hw.pin_reset);
         rc = HAL_ERR_IO;
         goto fail_spi;
     }
+    ESP_LOGI(TAG, "Init 4/6 : reset materiel SX1262 ok (BUSY=%d)",
+             gpio_get_level(ctx->hw.pin_busy));
 
     /* 5. Sequence de configuration radio. */
     rc = apply_radio_config(ctx);
     if (rc != HAL_OK) {
-        ESP_LOGE(TAG, "Configuration radio echouee");
+        ESP_LOGE(TAG, "Init 5/6 : apply_radio_config echoue (rc=%d) — "
+                      "SPI MISO=%d retourne du garbage ? chip pas alimente ?",
+                 rc, ctx->pin_miso);
         goto fail_spi;
     }
+    ESP_LOGI(TAG, "Init 5/6 : configuration radio appliquee");
 
     /* 6. Mutex + semaphore + ISR DIO1. */
     ctx->radio_mutex = xSemaphoreCreateMutex();
@@ -423,7 +463,8 @@ static hal_err_t c1262_init(const hal_lora_config_t *config, void *ctx_ptr)
 
     ctx->initialized = true;
     ctx->rx_running  = false;
-    ESP_LOGI(TAG, "Core1262 initialise (%lu Hz, SF%u, %d dBm)",
+    ESP_LOGI(TAG, "Init 6/6 : Core1262 pret (%lu Hz, SF%u, %d dBm) — "
+                  "transport_lora_send() est maintenant fonctionnel",
              (unsigned long)ctx->params.freq_hz,
              (unsigned)ctx->params.mod.sf,
              (int)ctx->params.power_dbm);
@@ -451,6 +492,15 @@ static hal_err_t c1262_send(const uint8_t *data, size_t len, void *ctx_ptr)
     if (!ctx->initialized)               return HAL_FAIL;
     if (!data || len == 0)               return HAL_ERR_INVALID;
     if (len > HAL_LORA_MAX_PACKET_SIZE)  return HAL_ERR_INVALID;
+
+    /*
+     * [F-HW-019] Trace entry/exit du send. Si le firmware crashe entre
+     * "send: entree" et "send: sortie", on saura que le blocage est
+     * dans c1262_send ; sinon le WDT vient d'ailleurs (lora_sync ou
+     * autre). BUSY=0 attendu au repos, BUSY=1 = SX1262 occupe.
+     */
+    ESP_LOGI(TAG, "send: entree, len=%u BUSY=%d", (unsigned)len,
+             gpio_get_level(ctx->hw.pin_busy));
 
     if (xSemaphoreTake(ctx->radio_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
         ESP_LOGE(TAG, "send : mutex radio indisponible");
@@ -516,6 +566,8 @@ done:
         sx126x_set_rx_with_timeout_in_rtc_step(sx, SX126X_RX_CONTINUOUS);
     }
     xSemaphoreGive(ctx->radio_mutex);
+    ESP_LOGI(TAG, "send: sortie, result=%d BUSY=%d",
+             (int)result, gpio_get_level(ctx->hw.pin_busy));
     return result;
 }
 

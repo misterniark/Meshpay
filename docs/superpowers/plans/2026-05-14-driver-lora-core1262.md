@@ -23,7 +23,9 @@ Tu ne connais pas ce codebase. Points clés :
 - **Sélection actuelle par cible** : `device_hal/CMakeLists.txt` ne compile `hal_lora_wio_e5.c` que `if(CONFIG_IDF_TARGET_ESP32)`. `main/CMakeLists.txt` choisit `transport_lora.c` (réel) vs `transport_lora_stub.c` (no-op) selon la même condition. **On remplace ce gating par cible par un gating Kconfig.**
 - **Tests** : projet ESP-IDF séparé `test_app/` ; `idf.py -C test_app build`. Les composants ajoutent leurs fichiers de test quand `PROJECT_NAME == "meshpay_test_app"`. Pattern Unity : `TEST_CASE("nom", "[tag]")`, `setUp`/`tearDown` en `__attribute__((weak))`. Le `test_app` réutilise `../components/device_hal` via `EXTRA_COMPONENT_DIRS` mais **n'inclut pas `main/`** → supprimer `transport_lora_stub.c` est sûr.
 - **Config radio** : `components/comm/lora_sync/src/lora_sync.c` (~ligne 678) construit `hal_lora_config_t` (868100000 Hz, SF9, BW=0/125kHz, CR=1/4-5, 14 dBm) et appelle `config->lora->init(...)`. **Ne pas toucher** — le backend Core1262 consomme ce `hal_lora_config_t`.
-- **Câblage Core1262 ↔ ESP32-S3** (vérifié sur schémas Waveshare) : SPI3_HOST. SCK=IO1, MOSI=IO2, MISO=IO3, NSS=IO4, RESET=IO5, BUSY=IO6, DIO1=IO7, RXEN=IO8, TXEN=IO9. DIO2 non connecté. DIO3 = TCXO interne (géré par firmware). Alim 3,3 V.
+- **Câblage Core1262 ↔ ESP32-S3** (vérifié sur schémas Waveshare, MISO révisé mai 2026) : SPI3_HOST. SCK=IO1, MOSI=IO2, **MISO=IO10** *(déplacé de IO3 — voir note ci-dessous)*, NSS=IO4, RESET=IO5, BUSY=IO6, DIO1=IO7, RXEN=IO8, TXEN=IO9. DIO2 non connecté. DIO3 = TCXO interne (géré par firmware). Alim 3,3 V.
+
+  > **Note MISO** : initialement câblé sur IO3, déplacé sur IO10 en mai 2026. IO3 est un *strapping pin* JTAG sur ESP32-S3 (source du signal JTAG) ; avec la console USB-Serial-JTAG active (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`), l'état flottant/conducteur du SX1262 MISO au boot rendait l'init Core1262 instable et, combiné au bug F-LT-001 (`s_lora_hal.send` NULL appelé sans garde), crashait le firmware au premier paiement reçu. Recâblage physique du fil MISO sur le header P1 + override `CONFIG_MESHPAY_LORA_C1262_PIN_MISO=10` dans `sdkconfig.defaults.esp32s3`.
 
 **Conventions du projet :** commentaires en français, détaillés. Build CMake. Tests unitaires pour les nouvelles fonctions pures.
 
@@ -118,7 +120,7 @@ config MESHPAY_LORA_C1262_PIN_MOSI
 config MESHPAY_LORA_C1262_PIN_MISO
     int "Core1262 : GPIO MISO"
     depends on MESHPAY_LORA_DRIVER_CORE1262
-    default 3
+    default 10  # ex-3, deplace mai 2026 (strap pin JTAG sur ESP32-S3)
 
 config MESHPAY_LORA_C1262_PIN_NSS
     int "Core1262 : GPIO NSS (chip-select)"

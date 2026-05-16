@@ -37,7 +37,17 @@ config MESHPAY_LORA_C1262_PIN_MOSI
 config MESHPAY_LORA_C1262_PIN_MISO
     int "Core1262 : GPIO MISO"
     depends on MESHPAY_LORA_DRIVER_CORE1262
-    default 3
+    default 10
+    help
+        GPIO sur lequel le SX1262 emet sa ligne MISO (input cote ESP32).
+
+        DEPLACE de GPIO3 a GPIO10 (mai 2026) : GPIO3 sur ESP32-S3 est
+        un strapping pin qui controle la source du signal JTAG au boot.
+        Avec la console USB-Serial-JTAG active (cf. sdkconfig.defaults.
+        esp32s3), brancher MISO sur GPIO3 rendait l'init SX1262
+        instable selon l'etat haute-impedance du module au boot et,
+        combine au bug F-LT-001, crashait le firmware au premier
+        paiement recu (NULL deref sur s_lora_hal.send).
 
 config MESHPAY_LORA_C1262_PIN_NSS
     int "Core1262 : GPIO NSS (chip-select)"

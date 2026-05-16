@@ -42,10 +42,24 @@ esp_err_t tx_validate_structure(const transaction_t *tx)
      * avec `parents[1] = {0}` est rejetée comme incohérente : si un
      * slot doit être vide, il ne doit pas être compté dans
      * parent_count. Renforce la topologie du DAG.
+     *
+     * [F-TX-010] Exception : un MINT peut avoir des parents à hash
+     * zéro — c'est le pattern du *genesis MINT* utilisé par
+     * `main.c` étape 10 pour le crédit initial de chaque device.
+     * Ces MINTs sont signés par le device lui-même (self-MINT, cf.
+     * F-TR-005 dans `tx_validate_master`) et propagés au peer
+     * discovery (F-MN-016). Sans cette exception, le pair récepteur
+     * rejetait le MINT propagé avec `DAG_MERGE_REJECTED + INVALID_ARG`
+     * malgré le fait que `dag_validate_transaction_impl` (chemin
+     * d'insertion locale) tolère déjà les parents zéro via
+     * `continue;` — l'incohérence rendait le bootstrap impossible
+     * entre deux devices.
      */
-    for (uint8_t i = 0; i < tx->parent_count; i++) {
-        if (hash_is_zero(&tx->parents[i])) {
-            return ESP_ERR_INVALID_ARG;
+    if (tx->type != TX_TYPE_MINT) {
+        for (uint8_t i = 0; i < tx->parent_count; i++) {
+            if (hash_is_zero(&tx->parents[i])) {
+                return ESP_ERR_INVALID_ARG;
+            }
         }
     }
 
@@ -182,6 +196,30 @@ esp_err_t tx_validate_master(const transaction_t *tx, const master_keys_t *maste
 
     /* Les TRANSFER n'ont pas besoin de vérification maître */
     if (tx->type == TX_TYPE_TRANSFER) {
+        return ESP_OK;
+    }
+
+    /*
+     * [F-TR-005] Exception self-MINT : un MINT dont `from == to` est
+     * une auto-déclaration de solde initial par un device. Ce pattern
+     * est utilisé pour le bootstrap (cf. main.c étape 10 : chaque
+     * device fait un `tx_create_mint` vers sa propre clé pour
+     * `initial_balance`). Sans cette exception, la propagation de ces
+     * MINTs aux peers découverts (handle_peer_discovered) était
+     * rejetée par le destinataire — son `master_keys` ne contient que
+     * sa propre clé, pas celle du peer.
+     *
+     * Le modèle de trust devient : chaque device est sa propre
+     * autorité de MINT pour lui-même, et les autres devices acceptent
+     * ces auto-MINTs comme des déclarations P2P de fonds. La fraude
+     * (auto-MINT d'un montant absurde) reste contenue par les autres
+     * couches : `lock_source` empêche le double-spend une fois propagé,
+     * et un opérateur peut blacklister le pubkey en bannissant le peer.
+     * Pour un déploiement production sans cette propriété, configurer
+     * une vraie `mint_authority` partagée hors-bande et désactiver
+     * cette exception via un futur Kconfig.
+     */
+    if (public_key_equal(&tx->from, &tx->to)) {
         return ESP_OK;
     }
 

@@ -386,6 +386,15 @@ static void rx_callback(const uint8_t *src_mac, const uint8_t *data,
         return;
     }
 
+    /*
+     * [F-EN-011] Trace tout message ESP-NOW recu : type + 2 derniers
+     * octets de src_mac (suffit a distinguer les peers en banc) + len.
+     * Sans cela, impossible de voir cote receveur si un paquet a ete
+     * recu mais rejete avant generation d'event (rate-limit, type
+     * inconnu, parsing fail).
+     */
+    ESP_LOGI(TAG, "rx: type=0x%02x src=%02x:%02x len=%u",
+             (unsigned)data[0], src_mac[4], src_mac[5], (unsigned)len);
     espnow_handle_rx(config, src_mac, data, len);
 }
 
@@ -526,6 +535,36 @@ void espnow_handle_rx(const espnow_config_t *config,
                                    &reply_len) == 0) {
             config->hal->send(src_mac, reply, reply_len, config->hal->ctx);
             ESP_LOGI(TAG, "ANNOUNCE signe envoye en reponse au DISCOVER");
+        }
+
+        /*
+         * [F-MN-016] Decode le DISCOVER pour recuperer le pubkey du
+         * discoverer, puis poste un PEER_DISCOVERED event vers
+         * core_task. Sans cela, le repondeur n'ajoutait pas le
+         * discoverer a son peer_table (seul le discoverer ajoutait le
+         * repondeur via la reception d'ANNOUNCE), ce qui empechait la
+         * propagation reciproque des MINTs au bootstrap.
+         *
+         * L'alias est laisse vide (DISCOVER ne le transporte pas) : si
+         * une decouverte reciproque (rare en pratique) genere plus
+         * tard un ANNOUNCE depuis le discoverer, add_peer mettra a jour
+         * l'entree existante avec l'alias correct.
+         *
+         * Pas de verification de signature ici : DISCOVER n'est pas
+         * signe (TODO [M6] dans le code original). L'authenticite est
+         * verifiee plus tard sur les TX recues (qui sont elles signees).
+         */
+        comm_msg_discover_t disc;
+        if (comm_msg_unpack_discover(data, len, &disc) == 0) {
+            evt.type = COMM_EVT_PEER_DISCOVERED;
+            memcpy(evt.src_mac, src_mac, 6);
+            memcpy(&evt.data.peer.public_key, &disc.sender_key,
+                   sizeof(public_key_t));
+            memcpy(evt.data.peer.mac_addr, src_mac, 6);
+            evt.data.peer.alias[0] = '\0';
+            if (xQueueSend(config->evt_queue, &evt, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "evt_queue pleine : PEER_DISCOVERED (DISCOVER) drop");
+            }
         }
         break;
     }

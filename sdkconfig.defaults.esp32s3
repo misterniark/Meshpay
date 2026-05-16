@@ -33,3 +33,11 @@ CONFIG_PM_ENABLE=y
 
 # --- LoRa : la carte Waveshare (ESP32-S3) est equipee du module Core1262 ---
 CONFIG_MESHPAY_LORA_DRIVER_CORE1262=y
+
+# Override explicite du MISO Core1262 (mai 2026) : auparavant GPIO3,
+# desormais GPIO10. GPIO3 est un strapping pin JTAG sur ESP32-S3 et
+# causait des crashes au premier paiement (cf. Kconfig MISO help +
+# F-LT-001 dans main/transport/transport_lora.c). Le defaut Kconfig
+# est deja 10 ; cette ligne sert de ceinture-bretelles pour
+# eviter qu'un sdkconfig herite ne reinjecte la vieille valeur 3.
+CONFIG_MESHPAY_LORA_C1262_PIN_MISO=10
