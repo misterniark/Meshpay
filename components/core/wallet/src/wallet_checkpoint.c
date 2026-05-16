@@ -8,12 +8,60 @@
  */
 
 #include "wallet/wallet_checkpoint.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdint.h>
 #include "esp_log.h"
 
 /** Tag pour les logs de ce module */
 static const char *TAG = "wallet_checkpoint";
+
+/*
+ * [F-WL-001] Helpers identiques à ceux de wallet.c (récursif → safe).
+ */
+static inline void chk_dag_lock(const dag_t *dag)
+{
+    if (dag != NULL && dag->mutex != NULL) {
+        xSemaphoreTakeRecursive(dag->mutex, portMAX_DELAY);
+    }
+}
+
+static inline void chk_dag_unlock(const dag_t *dag)
+{
+    if (dag != NULL && dag->mutex != NULL) {
+        xSemaphoreGiveRecursive(dag->mutex);
+    }
+}
+
+/*
+ * [F-WL-006] Compare deux entrées par leur clé publique (ordre
+ * lexicographique des octets). Utilisé par le tri final déterministe.
+ */
+static int compare_entries(const checkpoint_entry_t *a,
+                           const checkpoint_entry_t *b)
+{
+    return memcmp(a->key.bytes, b->key.bytes, CRYPTO_PUBLIC_KEY_SIZE);
+}
+
+/*
+ * Insertion-sort sur `accounts[]`. Tableau borné à 250 entrées, donc
+ * O(n²) acceptable (max ~62 500 comparaisons à chaque checkpoint, soit
+ * quelques millisecondes sur ESP32-S3).
+ */
+static void sort_accounts(checkpoint_t *checkpoint)
+{
+    for (uint32_t i = 1; i < checkpoint->account_count; i++) {
+        checkpoint_entry_t key = checkpoint->accounts[i];
+        int32_t j = (int32_t)i - 1;
+        while (j >= 0 &&
+               compare_entries(&checkpoint->accounts[j], &key) > 0) {
+            checkpoint->accounts[j + 1] = checkpoint->accounts[j];
+            j--;
+        }
+        checkpoint->accounts[j + 1] = key;
+    }
+}
 
 /**
  * @brief Cherche ou crée une entrée pour une clé publique dans le checkpoint.
@@ -51,11 +99,22 @@ esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
                             const public_key_t *fee_recipient,
                             checkpoint_t *checkpoint)
 {
+    return checkpoint_create_ext(dag, base, fee_recipient, checkpoint, NULL);
+}
+
+esp_err_t checkpoint_create_ext(const dag_t *dag, const checkpoint_t *base,
+                                const public_key_t *fee_recipient,
+                                checkpoint_t *checkpoint,
+                                hash_t *out_failed_tx_id)
+{
     if (dag == NULL || checkpoint == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
     memset(checkpoint, 0, sizeof(checkpoint_t));
+    if (out_failed_tx_id != NULL) {
+        memset(out_failed_tx_id, 0, sizeof(hash_t));
+    }
 
     /*
      * Si un checkpoint précédent existe, copier ses soldes comme base.
@@ -76,7 +135,23 @@ esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
         memcpy(checkpoint->accounts, base->accounts,
                base->account_count * sizeof(checkpoint_entry_t));
         checkpoint->account_count = base->account_count;
+
+        /*
+         * [F-WL-007] Propager `last_melt_timestamp` depuis le base.
+         * Sans cette recopie, le mécanisme de fonte (quand réactivé)
+         * repart de t=0 à chaque checkpoint et applique des ticks
+         * de rattrapage injustifiés.
+         */
+        checkpoint->last_melt_timestamp = base->last_melt_timestamp;
     }
+
+    /*
+     * [F-WL-001] Acquérir le mutex DAG pendant tout le parcours pour
+     * garantir l'atomicité vs un dag_merge_transaction concurrent. Le
+     * mutex étant récursif, c'est sûr même si l'appelant le détient
+     * déjà.
+     */
+    chk_dag_lock(dag);
 
     /*
      * Parcourir toutes les transactions confirmées du DAG
@@ -85,6 +160,8 @@ esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
     uint64_t latest_timestamp = 0;
     hash_t latest_tx_id;
     memset(&latest_tx_id, 0, sizeof(hash_t));
+
+    esp_err_t result = ESP_OK;
 
     for (uint32_t i = 0; i < dag->count; i++) {
         const transaction_t *tx = &dag->transactions[i];
@@ -97,17 +174,31 @@ esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
         /* Créditer le destinataire (reçoit uniquement amount, pas les frais) */
         int to_idx = find_or_create_account(checkpoint, &tx->to);
         if (to_idx < 0) {
-            return ESP_ERR_NO_MEM;
+            ESP_LOGW(TAG, "Saturation CHECKPOINT_MAX_ACCOUNTS au destinataire "
+                          "(TX index=%lu, type=%d)", (unsigned long)i, tx->type);
+            if (out_failed_tx_id != NULL) {
+                memcpy(out_failed_tx_id, &tx->id, sizeof(hash_t));
+            }
+            result = ESP_ERR_NO_MEM;
+            goto cleanup;
         }
 
         /*
          * [H1] Vérification d'overflow avant l'addition du solde.
          * Si le solde actuel + le montant dépasse UINT32_MAX, on refuse
          * l'opération pour éviter un dépassement silencieux.
+         * [F-WL-004] L'ID de la TX fautive est remonté pour permettre
+         * à l'appelant de la marquer CANCELLED.
          */
         if (checkpoint->accounts[to_idx].balance > UINT32_MAX - tx->amount) {
-            ESP_LOGW(TAG, "Overflow de solde détecté pour le destinataire");
-            return ESP_ERR_INVALID_STATE;
+            ESP_LOGW(TAG, "Overflow de solde détecté pour le destinataire "
+                          "(TX index=%lu, amount=%lu)",
+                     (unsigned long)i, (unsigned long)tx->amount);
+            if (out_failed_tx_id != NULL) {
+                memcpy(out_failed_tx_id, &tx->id, sizeof(hash_t));
+            }
+            result = ESP_ERR_INVALID_STATE;
+            goto cleanup;
         }
         checkpoint->accounts[to_idx].balance += tx->amount;
 
@@ -115,7 +206,13 @@ esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
         if (tx->type == TX_TYPE_TRANSFER) {
             int from_idx = find_or_create_account(checkpoint, &tx->from);
             if (from_idx < 0) {
-                return ESP_ERR_NO_MEM;
+                ESP_LOGW(TAG, "Saturation CHECKPOINT_MAX_ACCOUNTS a l'emetteur "
+                              "(TX index=%lu)", (unsigned long)i);
+                if (out_failed_tx_id != NULL) {
+                    memcpy(out_failed_tx_id, &tx->id, sizeof(hash_t));
+                }
+                result = ESP_ERR_NO_MEM;
+                goto cleanup;
             }
             /*
              * Le coût total pour l'émetteur = amount + fee.
@@ -128,8 +225,15 @@ esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
              * Si amount + fee dépasse UINT32_MAX, on refuse l'opération.
              */
             if (tx->amount > UINT32_MAX - tx->fee) {
-                ESP_LOGW(TAG, "Overflow de total_cost détecté (amount + fee)");
-                return ESP_ERR_INVALID_STATE;
+                ESP_LOGW(TAG, "Overflow de total_cost détecté "
+                              "(TX index=%lu, amount=%lu, fee=%lu)",
+                         (unsigned long)i, (unsigned long)tx->amount,
+                         (unsigned long)tx->fee);
+                if (out_failed_tx_id != NULL) {
+                    memcpy(out_failed_tx_id, &tx->id, sizeof(hash_t));
+                }
+                result = ESP_ERR_INVALID_STATE;
+                goto cleanup;
             }
             uint32_t total_cost = tx->amount + tx->fee;
             /* Protection contre le dépassement négatif */
@@ -150,12 +254,25 @@ esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
                 !public_key_is_zero(fee_recipient)) {
                 int fee_idx = find_or_create_account(checkpoint, fee_recipient);
                 if (fee_idx < 0) {
-                    return ESP_ERR_NO_MEM;
+                    ESP_LOGW(TAG, "Saturation CHECKPOINT_MAX_ACCOUNTS au "
+                                  "fee_recipient (TX index=%lu)",
+                             (unsigned long)i);
+                    if (out_failed_tx_id != NULL) {
+                        memcpy(out_failed_tx_id, &tx->id, sizeof(hash_t));
+                    }
+                    result = ESP_ERR_NO_MEM;
+                    goto cleanup;
                 }
                 /* [H1] Vérification d'overflow avant crédit du fee */
                 if (checkpoint->accounts[fee_idx].balance > UINT32_MAX - tx->fee) {
-                    ESP_LOGW(TAG, "Overflow de solde détecté pour le fee_recipient");
-                    return ESP_ERR_INVALID_STATE;
+                    ESP_LOGW(TAG, "Overflow de solde détecté pour le "
+                                  "fee_recipient (TX index=%lu, fee=%lu)",
+                             (unsigned long)i, (unsigned long)tx->fee);
+                    if (out_failed_tx_id != NULL) {
+                        memcpy(out_failed_tx_id, &tx->id, sizeof(hash_t));
+                    }
+                    result = ESP_ERR_INVALID_STATE;
+                    goto cleanup;
                 }
                 checkpoint->accounts[fee_idx].balance += tx->fee;
             }
@@ -171,7 +288,16 @@ esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
     checkpoint->timestamp = latest_timestamp;
     memcpy(&checkpoint->last_tx_id, &latest_tx_id, sizeof(hash_t));
 
-    return ESP_OK;
+    /*
+     * [F-WL-006] Tri lexicographique final des `accounts[]` pour
+     * produire un checkpoint structurellement déterministe entre
+     * devices (préparation consensus inter-pairs).
+     */
+    sort_accounts(checkpoint);
+
+cleanup:
+    chk_dag_unlock(dag);
+    return result;
 }
 
 esp_err_t checkpoint_get_balance(const checkpoint_t *checkpoint,

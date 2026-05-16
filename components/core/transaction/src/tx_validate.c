@@ -14,22 +14,11 @@
 #include "crypto/crypto_sign.h"
 #include <string.h>
 
-/**
- * @brief Vérifie si une clé publique est entièrement nulle.
- *
- * Utilisé pour vérifier que les champs "from" et "to" contiennent
- * bien une clé publique valide (non-nulle).
- *
- * @param key Clé publique à vérifier
- * @return true si tous les octets sont à zéro
+/*
+ * [F-TX-011] Helper local `is_key_zero` supprimé : on utilise désormais
+ * la fonction publique `public_key_is_zero` exposée par crypto_types.h.
+ * Cela élimine la duplication et le risque de divergence silencieuse.
  */
-static bool is_key_zero(const public_key_t *key)
-{
-    for (int i = 0; i < CRYPTO_PUBLIC_KEY_SIZE; i++) {
-        if (key->bytes[i] != 0) return false;
-    }
-    return true;
-}
 
 esp_err_t tx_validate_structure(const transaction_t *tx)
 {
@@ -47,16 +36,17 @@ esp_err_t tx_validate_structure(const transaction_t *tx)
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Au moins un parent doit être non-nul */
-    bool has_valid_parent = false;
+    /*
+     * [F-TX-009] TOUS les parents déclarés (index 0..parent_count-1)
+     * doivent être non-nuls. Une TX qui annonce `parent_count = 2`
+     * avec `parents[1] = {0}` est rejetée comme incohérente : si un
+     * slot doit être vide, il ne doit pas être compté dans
+     * parent_count. Renforce la topologie du DAG.
+     */
     for (uint8_t i = 0; i < tx->parent_count; i++) {
-        if (!hash_is_zero(&tx->parents[i])) {
-            has_valid_parent = true;
-            break;
+        if (hash_is_zero(&tx->parents[i])) {
+            return ESP_ERR_INVALID_ARG;
         }
-    }
-    if (!has_valid_parent) {
-        return ESP_ERR_INVALID_ARG;
     }
 
     /* Le type doit être valide */
@@ -73,12 +63,12 @@ esp_err_t tx_validate_structure(const transaction_t *tx)
      *
      * TRANSFER : le champ "from" est l'émetteur, il doit être non-nul.
      */
-    if (is_key_zero(&tx->from)) {
+    if (public_key_is_zero(&tx->from)) {
         return ESP_ERR_INVALID_ARG;
     }
 
     /* Le destinataire doit être non-nul */
-    if (is_key_zero(&tx->to)) {
+    if (public_key_is_zero(&tx->to)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -104,6 +94,30 @@ esp_err_t tx_validate_structure(const transaction_t *tx)
      */
     if (tx->type == TX_TYPE_TRANSFER &&
         memcmp(tx->from.bytes, tx->to.bytes, CRYPTO_PUBLIC_KEY_SIZE) == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
+     * [F-TX-003] TRANSFER : fee strictement inférieur à amount.
+     * Décision design 2026-05-16. La règle `fee < amount` garantit que
+     * le destinataire reçoit toujours un montant net strictement
+     * positif. Un fee == amount produirait un transfert net nul
+     * (destinataire reçoit 0), considéré comme dégénéré.
+     * Les MINT n'ont pas de fee — pas de check.
+     */
+    if (tx->type == TX_TYPE_TRANSFER && tx->fee >= tx->amount) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
+     * [F-TX-005] TRANSFER : seq doit être strictement > 0.
+     * Le seq=0 est réservé au genesis MINT de l'émetteur. Une TX
+     * TRANSFER avec seq=0 indique un wallet qui a perdu son compteur
+     * NVS et n'a pas pu le récupérer via F-DG-011 — c'est un état
+     * pathologique qui produirait des conflits silencieux côté merge.
+     * Mieux vaut rejeter la TX à la source.
+     */
+    if (tx->type == TX_TYPE_TRANSFER && tx->seq == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 

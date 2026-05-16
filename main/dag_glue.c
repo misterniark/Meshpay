@@ -27,39 +27,75 @@ void auto_checkpoint_if_needed(void)
         return;
     }
 
-    checkpoint_t new_chk;
-    esp_err_t ret = checkpoint_create(&s_dag, &s_checkpoint,
-                                      &s_currency.mint_authorities[0], &new_chk);
+    /*
+     * [F-WL-010] `checkpoint_t` fait ~9 Ko (250 entrées) — trop gros
+     * pour la stack. Allocation statique : auto_checkpoint_if_needed
+     * est appelée sous s_state_mutex, donc l'accès est sérialisé.
+     */
+    static checkpoint_t new_chk;
+    memset(&new_chk, 0, sizeof(new_chk));
+
+    /*
+     * [F-WL-004] Si checkpoint_create échoue à cause d'une TX qui
+     * provoque un overflow ou sature CHECKPOINT_MAX_ACCOUNTS, on
+     * récupère l'ID de la TX fautive (out param) et on la marque
+     * CANCELLED. Le prochain appel pourra alors aboutir.
+     */
+    hash_t failed_tx_id;
+    memset(&failed_tx_id, 0, sizeof(failed_tx_id));
+    esp_err_t ret = checkpoint_create_ext(&s_dag, &s_checkpoint,
+                                          &s_currency.mint_authorities[0],
+                                          &new_chk, &failed_tx_id);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Echec creation checkpoint automatique (%d)", ret);
+        if (ret == ESP_ERR_INVALID_STATE || ret == ESP_ERR_NO_MEM) {
+            /*
+             * [F-WL-004] Marquer la TX fautive comme CANCELLED si
+             * identifiée. Le checkpoint suivant la sautera et pourra
+             * progresser. Sans ce mécanisme, une TX malformée (amount
+             * proche de UINT32_MAX, identités > CHECKPOINT_MAX_ACCOUNTS)
+             * bloquerait définitivement l'élagage et saturerait le DAG.
+             */
+            bool zero_id = true;
+            for (size_t i = 0; i < sizeof(failed_tx_id); i++) {
+                if (failed_tx_id.bytes[i] != 0) { zero_id = false; break; }
+            }
+            if (!zero_id) {
+                esp_err_t cret = dag_set_status(&s_dag, &failed_tx_id,
+                                                TX_STATUS_CANCELLED);
+                if (cret == ESP_OK) {
+                    ESP_LOGW(TAG, "TX fautive marquee CANCELLED pour "
+                                  "debloquer le checkpoint (cf. F-WL-004)");
+                } else {
+                    ESP_LOGE(TAG, "Echec marquage CANCELLED (%d) — "
+                                  "intervention manuelle requise", cret);
+                }
+            }
+        }
         return;
     }
 
     /*
-     * Fonte globale appliquee a tous les comptes du checkpoint quand
-     * le temps maitre est dispo. Un seul timestamp global suffit
-     * (meme periode pour tous). Tous les devices appliquent la meme
-     * formule, donc convergent.
+     * [F-CU-002] Fonte AUTOMATIQUE DÉSACTIVÉE — décision design 2026-05-16.
+     *
+     * Le mécanisme de fonte tel qu'implémenté n'était appliqué qu'aux
+     * devices `TIME_MODE_MASTER` (cf. condition d'origine). Les acheteurs
+     * en mode SLAVE ou sans horloge ne fondaient jamais leurs soldes —
+     * violation de la règle monétaire sur la majorité du parc.
+     *
+     * Plutôt que d'étendre naïvement la fonte à tous les devices avec
+     * wall-clock (option (a) du finding), on suspend le déclenchement
+     * automatique tant qu'un mécanisme robuste n'est pas conçu :
+     *   - quorum d'application synchronisé entre devices,
+     *   - garantie de convergence en présence de devices intermittents,
+     *   - persistance de last_melt_timestamp cohérente après reboot.
+     *
+     * Le code des fonctions `currency_melt_*` reste en place et testé
+     * pour une réintroduction propre dans un Lot dédié. Le champ
+     * `s_checkpoint.last_melt_timestamp` est simplement propagé tel
+     * quel sans avancer.
      */
-    if (s_currency.melt_enabled &&
-        s_time_manager.mode == TIME_MODE_MASTER &&
-        time_manager_has_valid_master(&s_time_manager)) {
-        uint64_t now = get_time_ms_wrapper();
-        uint64_t last_ts = s_checkpoint.last_melt_timestamp;
-        uint32_t ticks = currency_melt_ticks_due(&s_currency, last_ts, now);
-        if (ticks > 0) {
-            for (uint32_t i = 0; i < new_chk.account_count; i++) {
-                new_chk.accounts[i].balance =
-                    currency_melt_apply(&s_currency,
-                                        new_chk.accounts[i].balance, ticks);
-            }
-            new_chk.last_melt_timestamp =
-                currency_melt_next_timestamp(&s_currency, last_ts, ticks, now);
-            ESP_LOGI(TAG, "Fonte checkpoint: %"PRIu32" ticks", ticks);
-        } else {
-            new_chk.last_melt_timestamp = last_ts;
-        }
-    }
+    new_chk.last_melt_timestamp = s_checkpoint.last_melt_timestamp;
 
     memcpy(&s_checkpoint, &new_chk, sizeof(checkpoint_t));
     if (s_checkpoint_save) {

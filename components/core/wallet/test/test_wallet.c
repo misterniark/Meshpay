@@ -15,6 +15,8 @@
 #include "crypto/crypto_keys.h"
 #include "currency/currency_config.h"
 #include "currency/currency_melt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -108,7 +110,7 @@ TEST_CASE("wallet_solde_apres_transfer", "[wallet]")
     /* TRANSFER Alice → Bob : 100 */
     transaction_t tx_transfer;
     tx_create_transfer(&tx_transfer, &alice, &bob.public_key,
-                       100, 0, 0, 0, &tx_mint.id, 1, 2000);
+                       100, 0, 0, 1, &tx_mint.id, 1, 2000);
     /* Forcer le statut CONFIRMED pour ce test */
     tx_transfer.status = TX_STATUS_CONFIRMED;
     dag_insert(&dag, &tx_transfer);
@@ -155,7 +157,7 @@ TEST_CASE("wallet_solde_locked_deduit", "[wallet]")
     /* TRANSFER Alice → Bob : 200 (status LOCKED par défaut) */
     transaction_t tx_locked;
     tx_create_transfer(&tx_locked, &alice, &bob.public_key,
-                       200, 0, 0, 0, &tx_mint.id, 1, 2000);
+                       200, 0, 0, 1, &tx_mint.id, 1, 2000);
     dag_insert(&dag, &tx_locked);
 
     /* Solde Alice : 500 - 200 = 300 (même si LOCKED, c'est déduit) */
@@ -191,7 +193,7 @@ TEST_CASE("wallet_solde_cancelled_ignore", "[wallet]")
     /* TRANSFER 200 CANCELLED */
     transaction_t tx_cancelled;
     tx_create_transfer(&tx_cancelled, &alice, &bob.public_key,
-                       200, 0, 0, 0, &tx_mint.id, 1, 2000);
+                       200, 0, 0, 1, &tx_mint.id, 1, 2000);
     tx_cancelled.status = TX_STATUS_CANCELLED;
     dag_insert(&dag, &tx_cancelled);
 
@@ -264,7 +266,7 @@ TEST_CASE("wallet_solde_avec_transfer_fee", "[wallet]")
     /* TRANSFER Alice → Bob : 100 avec fee = 10 (CONFIRMED) */
     transaction_t tx_transfer;
     tx_create_transfer(&tx_transfer, &alice, &bob.public_key,
-                       100, 0, 10, 0, &tx_mint.id, 1, 2000);
+                       100, 0, 10, 1, &tx_mint.id, 1, 2000);
     tx_transfer.status = TX_STATUS_CONFIRMED;
     dag_insert(&dag, &tx_transfer);
 
@@ -323,7 +325,7 @@ TEST_CASE("wallet_solde_locked_avec_fee", "[wallet]")
     /* TRANSFER LOCKED Alice → Bob : 200 avec fee = 5 */
     transaction_t tx_locked;
     tx_create_transfer(&tx_locked, &alice, &bob.public_key,
-                       200, 0, 5, 0, &tx_mint.id, 1, 2000);
+                       200, 0, 5, 1, &tx_mint.id, 1, 2000);
     dag_insert(&dag, &tx_locked);
 
     /* Solde Alice : 500 - (200 + 5) = 295, le fee est dans la TX */
@@ -365,7 +367,7 @@ TEST_CASE("checkpoint_avec_transfer_fee", "[wallet]")
 
     transaction_t tx_transfer;
     tx_create_transfer(&tx_transfer, &alice, &bob.public_key,
-                       100, 0, 10, 0, &tx_mint.id, 1, 2000);
+                       100, 0, 10, 1, &tx_mint.id, 1, 2000);
     tx_transfer.status = TX_STATUS_CONFIRMED;
     dag_insert(&dag, &tx_transfer);
 
@@ -411,7 +413,7 @@ TEST_CASE("checkpoint_fee_brule_sans_recipient", "[wallet]")
 
     transaction_t tx_transfer;
     tx_create_transfer(&tx_transfer, &alice, &bob.public_key,
-                       100, 0, 10, 0, &tx_mint.id, 1, 2000);
+                       100, 0, 10, 1, &tx_mint.id, 1, 2000);
     tx_transfer.status = TX_STATUS_CONFIRMED;
     dag_insert(&dag, &tx_transfer);
 
@@ -620,7 +622,7 @@ TEST_CASE("checkpoint_creation", "[wallet]")
     /* TRANSFER Alice → Bob : 100 sans frais (forcé CONFIRMED) */
     transaction_t tx_transfer;
     tx_create_transfer(&tx_transfer, &alice, &bob.public_key,
-                       100, 0, 0, 0, &tx_mint.id, 1, 2000);
+                       100, 0, 0, 1, &tx_mint.id, 1, 2000);
     tx_transfer.status = TX_STATUS_CONFIRMED;
     dag_insert(&dag, &tx_transfer);
 
@@ -858,7 +860,7 @@ TEST_CASE("checkpoint_ignore_cancelled", "[wallet]")
     /* TRANSFER 100 Alice → Bob, forcé CANCELLED */
     transaction_t tx_transfer;
     tx_create_transfer(&tx_transfer, &alice, &bob.public_key,
-                       100, 0, 0, 0, &tx_mint.id, 1, 2000);
+                       100, 0, 0, 1, &tx_mint.id, 1, 2000);
     tx_transfer.status = TX_STATUS_CANCELLED;
     dag_insert(&dag, &tx_transfer);
 
@@ -917,7 +919,7 @@ TEST_CASE("checkpoint_locked_inclus", "[wallet]")
     /* TRANSFER 100 Alice → Bob (LOCKED par défaut, non confirmé) */
     transaction_t tx_locked;
     tx_create_transfer(&tx_locked, &alice, &bob.public_key,
-                       100, 0, 0, 0, &tx_mint.id, 1, 2000);
+                       100, 0, 0, 1, &tx_mint.id, 1, 2000);
     /* tx_create_transfer met status = TX_STATUS_LOCKED par défaut */
     dag_insert(&dag, &tx_locked);
 
@@ -1681,4 +1683,212 @@ TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
     free(dag2);
     free(chk0);
     free(chk1);
+}
+
+/* ========================================================================= */
+/*    Tests wallet_get_balance_for (F-WL-008) — couverture manquante         */
+/* ========================================================================= */
+
+/**
+ * [F-WL-008] wallet_get_balance_for : cas nominal — checkpoint + TX
+ * post-checkpoint. Doit accumuler base (du checkpoint) + delta (du DAG).
+ */
+TEST_CASE("wallet_get_balance_for_checkpoint_plus_dag", "[wallet]")
+{
+    dag_t dag;
+    dag_init(&dag);
+
+    keypair_t master, alice, bob;
+    crypto_generate_keypair(&master);
+    crypto_generate_keypair(&alice);
+    crypto_generate_keypair(&bob);
+
+    /* Construire un checkpoint base : Alice a 500. */
+    checkpoint_t base;
+    memset(&base, 0, sizeof(base));
+    memcpy(&base.accounts[0].key, &alice.public_key, sizeof(public_key_t));
+    base.accounts[0].balance = 500;
+    base.account_count = 1;
+
+    /* TX post-checkpoint : Alice envoie 100 à Bob (fee=5, brûlé). */
+    hash_t parent;
+    make_hash(&parent, 0xAA);
+    transaction_t tx;
+    tx_create_transfer(&tx, &alice, &bob.public_key,
+                       100, 0, 5, 1, &parent, 1, 2000);
+    tx.status = TX_STATUS_CONFIRMED;
+    dag_insert(&dag, &tx);
+
+    uint32_t bal = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(&dag, &base, &alice.public_key, NULL, &bal));
+    TEST_ASSERT_EQUAL_UINT32(500 - 100 - 5, bal);
+
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(&dag, &base, &bob.public_key, NULL, &bal));
+    TEST_ASSERT_EQUAL_UINT32(100, bal);
+
+}
+
+/**
+ * [F-WL-002] wallet_get_balance_for : régression — confirme que le
+ * cas `target == fee_recipient == tx->to` est traité correctement
+ * (target reçoit amount + fee, ce qui est la sémantique attendue, et
+ * non un double-crédit). Ce finding était un FAUX POSITIF de l'audit
+ * initial : l'analyse ré-faite confirme la cohérence avec
+ * `checkpoint_create`.
+ */
+TEST_CASE("wallet_get_balance_for_target_is_fee_recipient", "[wallet]")
+{
+    dag_t dag;
+    dag_init(&dag);
+
+    keypair_t alice, bob;
+    crypto_generate_keypair(&alice);
+    crypto_generate_keypair(&bob);
+
+    /* Alice envoie 100 à Bob, fee=10, Bob est aussi fee_recipient. */
+    hash_t parent;
+    make_hash(&parent, 0xBB);
+    transaction_t tx;
+    tx_create_transfer(&tx, &alice, &bob.public_key,
+                       100, 0, 10, 1, &parent, 1, 3000);
+    tx.status = TX_STATUS_CONFIRMED;
+    dag_insert(&dag, &tx);
+
+    uint32_t bal = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(&dag, NULL, &bob.public_key,
+                               &bob.public_key, &bal));
+    /* Bob reçoit amount (en tant que destinataire) + fee (en tant que
+     * fee_recipient) = 110. Pas de double-crédit, juste deux flux
+     * distincts qui convergent vers la même clé. */
+    TEST_ASSERT_EQUAL_UINT32(110, bal);
+
+    /* Vérifier la cohérence avec checkpoint_create dans le même cas. */
+    checkpoint_t chk;
+    checkpoint_create(&dag, NULL, &bob.public_key, &chk);
+    uint32_t chk_balance = 0;
+    checkpoint_get_balance(&chk, &bob.public_key, &chk_balance);
+    TEST_ASSERT_EQUAL_UINT32(bal, chk_balance);
+
+}
+
+/**
+ * [F-WL-008] wallet_get_balance_for : checkpoint NULL — solde issu
+ * uniquement du DAG (aucun crédit base).
+ */
+TEST_CASE("wallet_get_balance_for_null_checkpoint", "[wallet]")
+{
+    dag_t dag;
+    dag_init(&dag);
+
+    keypair_t master, alice;
+    crypto_generate_keypair(&master);
+    crypto_generate_keypair(&alice);
+
+    hash_t parent;
+    make_hash(&parent, 0xCC);
+    transaction_t tx_mint;
+    tx_create_mint(&tx_mint, &master, &alice.public_key, 250, 0, 0,
+                   &parent, 1, 1000);
+    dag_insert(&dag, &tx_mint);
+
+    uint32_t bal = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(&dag, NULL, &alice.public_key, NULL, &bal));
+    TEST_ASSERT_EQUAL_UINT32(250, bal);
+
+}
+
+/* ========================================================================= */
+/*    Tests F-WL-009 — doublon tx_id rejeté dans lock_table_lock              */
+/* ========================================================================= */
+
+TEST_CASE("lock_table_rejects_duplicate_tx_id", "[wallet]")
+{
+    keypair_t alice;
+    crypto_generate_keypair(&alice);
+
+    wallet_t wallet;
+    dag_t dag;
+    dag_init(&dag);
+    wallet_init(&wallet, &alice.public_key, &dag, mock_get_time);
+
+    lock_table_t table;
+    lock_table_init(&table, &wallet);
+
+    hash_t tx_id;
+    make_hash(&tx_id, 0x42);
+
+    /* Premier lock : OK. */
+    TEST_ASSERT_EQUAL(ESP_OK, lock_table_lock(&table, &tx_id, 100));
+
+    /* Deuxième lock avec le même tx_id : rejeté. */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE,
+                      lock_table_lock(&table, &tx_id, 200));
+
+    /* Le montant total verrouillé reste 100 (pas 100+200). */
+    uint32_t total = 0;
+    lock_table_total_locked(&table, &total);
+    TEST_ASSERT_EQUAL_UINT32(100, total);
+
+}
+
+/* ========================================================================= */
+/*    Tests F-WL-006 — accounts triés par clé publique                        */
+/* ========================================================================= */
+
+TEST_CASE("checkpoint_accounts_sorted_lexicographically", "[wallet]")
+{
+    dag_t dag;
+    dag_init(&dag);
+
+    keypair_t master, k1, k2, k3;
+    crypto_generate_keypair(&master);
+    crypto_generate_keypair(&k1);
+    crypto_generate_keypair(&k2);
+    crypto_generate_keypair(&k3);
+
+    /* MINT en désordre arbitraire (insertion par k2, k3, k1). */
+    hash_t p;
+    make_hash(&p, 0xEE);
+    transaction_t t1, t2, t3;
+    tx_create_mint(&t1, &master, &k2.public_key, 10, 0, 0, &p, 1, 1000);
+    dag_insert(&dag, &t1);
+    tx_create_mint(&t2, &master, &k3.public_key, 20, 0, 0, &t1.id, 1, 2000);
+    dag_insert(&dag, &t2);
+    tx_create_mint(&t3, &master, &k1.public_key, 30, 0, 0, &t2.id, 1, 3000);
+    dag_insert(&dag, &t3);
+
+    checkpoint_t chk;
+    TEST_ASSERT_EQUAL(ESP_OK, checkpoint_create(&dag, NULL, NULL, &chk));
+
+    /* Vérifier que les accounts sont triés par key.bytes ascendant. */
+    for (uint32_t i = 1; i < chk.account_count; i++) {
+        int cmp = memcmp(chk.accounts[i - 1].key.bytes,
+                         chk.accounts[i].key.bytes,
+                         CRYPTO_PUBLIC_KEY_SIZE);
+        TEST_ASSERT_LESS_THAN_INT(0, cmp);
+    }
+
+}
+
+/* ========================================================================= */
+/*    Tests F-WL-007 — last_melt_timestamp propagé depuis base                */
+/* ========================================================================= */
+
+TEST_CASE("checkpoint_propagates_last_melt_timestamp_from_base", "[wallet]")
+{
+    dag_t dag;
+    dag_init(&dag);
+
+    checkpoint_t base;
+    memset(&base, 0, sizeof(base));
+    base.last_melt_timestamp = 42424242ULL;
+
+    checkpoint_t chk;
+    TEST_ASSERT_EQUAL(ESP_OK, checkpoint_create(&dag, &base, NULL, &chk));
+    TEST_ASSERT_EQUAL_UINT64(42424242ULL, chk.last_melt_timestamp);
+
 }

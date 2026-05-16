@@ -16,9 +16,11 @@
 #include <string.h>
 
 #include "sdkconfig.h"
+#include "esp_log.h"
+
+static const char *TAG = "currency_rules";
 
 #if CONFIG_MESHPAY_TEST_SKIP_MINT_AUTHORITY
-#include "esp_log.h"
 /*
  * Garde-fou Release : empeche toute production binaire avec le bypass
  * actif. Si quelqu'un oublie de desactiver l'option avant de passer
@@ -56,6 +58,12 @@ currency_err_t currency_check_expiry(const currency_config_t *config,
         return CURRENCY_OK;
     }
 
+    /*
+     * [F-CU-011] Borne INCLUSIVE : la monnaie est valide jusqu'à et y
+     * compris l'instant `valid_until`. La condition stricte `>` autorise
+     * `current_time == valid_until`. Décision design 2026-05-16 :
+     * conserver le statu quo (test `currency_validates_at_exact_expiry`).
+     */
     if (current_time > config->valid_until) {
         return CURRENCY_ERR_EXPIRED;
     }
@@ -141,6 +149,19 @@ currency_err_t currency_check_mint_authority(const currency_config_t *config,
 {
     if (!config || !signer_key) return CURRENCY_ERR_NULL_PARAM;
 
+    /*
+     * [F-CU-004] Garde explicite sur mint_authority_count == 0 :
+     * sans autorité configurée, AUCUN MINT n'est autorisé. Sans cette
+     * garde, la boucle for ne s'exécute pas et la fonction tombe
+     * silencieusement dans NOT_AUTHORITY. On loggue explicitement la
+     * cause pour aider au diagnostic en cas de corruption NVS.
+     */
+    if (config->mint_authority_count == 0) {
+        ESP_LOGE(TAG, "currency_check_mint_authority: mint_authority_count=0 "
+                      "(config NVS corrompue ?) — MINT refuse");
+        return CURRENCY_ERR_NOT_AUTHORITY;
+    }
+
 #if CONFIG_MESHPAY_TEST_SKIP_MINT_AUTHORITY
     /*
      * TEST MODE : on accepte n'importe quelle cle signataire pour
@@ -187,7 +208,13 @@ currency_err_t currency_check_cooldown(const currency_config_t *config,
         return CURRENCY_OK;
     }
 
-    /* Vérifier que le délai minimum est respecté */
+    /*
+     * Vérifier que le délai minimum est respecté.
+     *
+     * [F-CU-007] Le produit `last_transfer_time + transfer_cooldown_ms`
+     * ne peut pas déborder uint64_t en pratique sur ESP32 (UINT64_MAX
+     * en millisecondes ≈ 584 millions d'années). Non exploitable.
+     */
     if (current_time < last_transfer_time + (uint64_t)config->transfer_cooldown_ms) {
         return CURRENCY_ERR_COOLDOWN;
     }
@@ -214,6 +241,20 @@ currency_err_t currency_validate(const currency_config_t *config,
     if (!config || !tx) return CURRENCY_ERR_NULL_PARAM;
 
     currency_err_t err;
+
+    /*
+     * [F-CU-008] `current_time == 0` désactive intentionnellement
+     * cooldown et expiration (tests, premier sync horloge non encore
+     * reçu). En production, ce cas représente la fenêtre de boot
+     * avant première synchronisation maître et signale que les checks
+     * temporels sont skippés. On loggue un warning pour rendre la
+     * situation visible en debug ; le bypass est conservé par décision
+     * design (2026-05-16).
+     */
+    if (current_time == 0) {
+        ESP_LOGW(TAG, "currency_validate appele avec current_time=0 "
+                      "(cooldown + expiry skippes) — boot ou test ?");
+    }
 
     /* 1. currency_id */
     err = currency_check_id(config, tx);
@@ -246,6 +287,57 @@ currency_err_t currency_validate(const currency_config_t *config,
         /* Plafond de supply */
         err = currency_check_supply(config, tx, total_minted);
         if (err != CURRENCY_OK) return err;
+    }
+
+    return CURRENCY_OK;
+}
+
+/* ================================================================
+ * Validation de la configuration elle-même
+ * ================================================================ */
+
+currency_err_t currency_config_validate(const currency_config_t *config)
+{
+    if (!config) return CURRENCY_ERR_NULL_PARAM;
+
+    /*
+     * [F-CU-006] Garde-fous anti-corruption NVS.
+     *
+     * Une config chargée depuis NVS sans validation peut provoquer :
+     *  - effacement des soldes si `melt_bps > CURRENCY_BPS_SCALE`,
+     *  - accès OOB sur mint_authorities[] si count > MAX,
+     *  - boucle infinie de fonte si period == 0 avec enabled == true.
+     *
+     * On loggue chaque violation pour faciliter le diagnostic et on
+     * retourne au premier échec (l'appelant doit basculer sur une
+     * config par défaut).
+     */
+    if (config->mint_authority_count > CURRENCY_MAX_MINT_AUTHORITIES) {
+        ESP_LOGE(TAG, "config invalide : mint_authority_count=%u > MAX=%u",
+                 config->mint_authority_count,
+                 CURRENCY_MAX_MINT_AUTHORITIES);
+        return CURRENCY_ERR_NOT_AUTHORITY;
+    }
+
+    if (config->melt_bps > CURRENCY_BPS_SCALE) {
+        ESP_LOGE(TAG, "config invalide : melt_bps=%u > SCALE=%u",
+                 config->melt_bps, CURRENCY_BPS_SCALE);
+        return CURRENCY_ERR_WRONG_ID;
+    }
+
+    if (config->melt_enabled && config->melt_period_seconds == 0) {
+        ESP_LOGE(TAG, "config invalide : melt_enabled=true avec "
+                      "melt_period_seconds=0");
+        return CURRENCY_ERR_WRONG_ID;
+    }
+
+    if (config->max_transfer_amount > 0 &&
+        config->min_transfer_amount > config->max_transfer_amount) {
+        ESP_LOGE(TAG, "config invalide : min_transfer_amount=%lu > "
+                      "max_transfer_amount=%lu",
+                 (unsigned long)config->min_transfer_amount,
+                 (unsigned long)config->max_transfer_amount);
+        return CURRENCY_ERR_AMOUNT_TOO_HIGH;
     }
 
     return CURRENCY_OK;

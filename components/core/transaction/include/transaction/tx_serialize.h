@@ -38,9 +38,16 @@
 /**
  * @brief Sérialise les champs "signables" d'une transaction en CBOR.
  *
- * Les champs sérialisés sont : type, from, to, amount, parents, timestamp.
- * Les champs id et signature sont exclus car ils sont calculés à partir
- * de cette sérialisation.
+ * [F-TX-004] Les 9 champs sérialisés sont : `type, from, to, amount,
+ * parents, timestamp, currency_id, fee, seq`. Les champs `id`,
+ * `signature` et `status` sont exclus : `id` est le SHA-256 du
+ * signable lui-même, `signature` est l'Ed25519 de ce hash, et `status`
+ * est volontairement non-signé (cf. politique CBOR_KEY_STATUS dans
+ * tx_serialize.c).
+ *
+ * Une modification quelconque de l'un de ces 9 champs après signature
+ * casse la vérification — toute la surface couverte par la signature
+ * est listée ci-dessus.
  *
  * @param[in]  tx         Transaction à sérialiser
  * @param[out] buffer     Buffer de sortie CBOR
@@ -76,6 +83,12 @@ esp_err_t tx_serialize_full(const transaction_t *tx,
  * Reconstruit une structure transaction_t à partir du CBOR reçu via
  * ESP-NOW ou LoRa. Tous les champs sont restaurés, y compris id,
  * signature et status.
+ *
+ * [F-TX-006] Cette fonction NE VALIDE PAS la structure ni la signature.
+ * Tout appelant doit enchaîner :
+ *   `tx_deserialize → tx_validate_structure → tx_validate_signature`
+ * avant d'utiliser la transaction. Un CBOR tronqué donne une TX avec
+ * des champs à zéro qui sera rejetée par `tx_validate_structure`.
  *
  * @param[in]  buffer     Buffer CBOR d'entrée
  * @param[in]  buffer_len Taille du buffer

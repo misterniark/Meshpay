@@ -53,7 +53,7 @@ TEST_CASE("create_transfer_succes", "[transaction]")
 
     transaction_t tx;
     esp_err_t err = tx_create_transfer(&tx, &alice, &bob.public_key,
-                                       100, 0, 0, 0, &parent, 1, 1000);
+                                       100, 0, 0, 1, &parent, 1, 1000);
     TEST_ASSERT_EQUAL(ESP_OK, err);
 
     /* Vérifier les champs */
@@ -112,7 +112,7 @@ TEST_CASE("create_transfer_montant_zero", "[transaction]")
 
     transaction_t tx;
     esp_err_t err = tx_create_transfer(&tx, &alice, &bob.public_key,
-                                       0, 0, 0, 0, &parent, 1, 1000);
+                                       0, 0, 0, 1, &parent, 1, 1000);
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
 }
 
@@ -130,7 +130,7 @@ TEST_CASE("create_transfer_trop_de_parents", "[transaction]")
 
     transaction_t tx;
     esp_err_t err = tx_create_transfer(&tx, &alice, &bob.public_key,
-                                       100, 0, 0, 0, parents, 3, 1000);
+                                       100, 0, 0, 1, parents, 3, 1000);
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
 }
 
@@ -149,7 +149,7 @@ TEST_CASE("create_transfer_deux_parents", "[transaction]")
 
     transaction_t tx;
     esp_err_t err = tx_create_transfer(&tx, &alice, &bob.public_key,
-                                       50, 0, 0, 0, parents, 2, 3000);
+                                       50, 0, 0, 1, parents, 2, 3000);
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_EQUAL(2, tx.parent_count);
 }
@@ -174,10 +174,14 @@ TEST_CASE("serialize_deserialize_roundtrip", "[transaction]")
     hash_t parent;
     make_dummy_hash(&parent, 0xDD);
 
-    /* Créer une transaction TRANSFER */
+    /*
+     * [F-TX-012] Créer une transaction TRANSFER avec des valeurs
+     * non-nulles pour currency_id, fee et seq afin de détecter une
+     * régression silencieuse d'encodage de ces trois champs.
+     */
     transaction_t tx_original;
     tx_create_transfer(&tx_original, &alice, &bob.public_key,
-                       200, 0, 0, 0, &parent, 1, 5000);
+                       200, 42, 5, 7, &parent, 1, 5000);
 
     /* Sérialiser en CBOR (full) */
     uint8_t buffer[TX_CBOR_MAX_SIZE];
@@ -200,38 +204,47 @@ TEST_CASE("serialize_deserialize_roundtrip", "[transaction]")
     TEST_ASSERT_EQUAL(tx_original.parent_count, tx_restored.parent_count);
     TEST_ASSERT_EQUAL(tx_original.timestamp, tx_restored.timestamp);
     TEST_ASSERT_EQUAL(tx_original.status, tx_restored.status);
+    /* [F-TX-012] currency_id, fee, seq doivent survivre au roundtrip. */
+    TEST_ASSERT_EQUAL(tx_original.currency_id, tx_restored.currency_id);
+    TEST_ASSERT_EQUAL(tx_original.fee, tx_restored.fee);
+    TEST_ASSERT_EQUAL(tx_original.seq, tx_restored.seq);
     TEST_ASSERT_EQUAL_MEMORY(tx_original.signature.bytes,
                              tx_restored.signature.bytes,
                              CRYPTO_SIGNATURE_SIZE);
 }
 
 /**
- * @brief Vérifie que la taille CBOR reste dans la contrainte ESP-NOW (250 octets).
+ * [F-TX-008] Vérifie que la taille CBOR reste dans TX_CBOR_MAX_SIZE (320).
  *
- * Teste le pire cas : TRANSFER avec 2 parents (taille maximale).
+ * Teste le pire cas : TRANSFER avec 2 parents, amount/fee/seq/timestamp
+ * tous au maximum. Le buffer est dimensionné à TX_CBOR_MAX_SIZE pour
+ * détecter un dépassement réel (un buffer plus petit ferait déborder
+ * la stack avant que la garde de taille soit atteinte).
  */
-TEST_CASE("serialize_taille_max_250_octets", "[transaction]")
+TEST_CASE("serialize_pire_cas_2_parents", "[transaction]")
 {
     keypair_t alice, bob;
     crypto_generate_keypair(&alice);
     crypto_generate_keypair(&bob);
 
     hash_t parents[2];
-    /* Lot E.1bis (mai 2026) : TX_CBOR_MAX_SIZE bumpe a 320 octets pour
-     * absorber le champ `seq` ajoute au Lot B. ESP-NOW V2 supporte
-     * largement cette taille (jusqu'a 1490 octets de payload utile). */
     make_dummy_hash(&parents[0], 0xEE);
     make_dummy_hash(&parents[1], 0xFF);
 
     transaction_t tx;
-    tx_create_transfer(&tx, &alice, &bob.public_key, 999999, 0, 0, 0, parents, 2, UINT64_MAX);
+    tx_create_transfer(&tx, &alice, &bob.public_key,
+                       999999, UINT32_MAX, 999998, UINT32_MAX,
+                       parents, 2, UINT64_MAX);
 
-    uint8_t buffer[300];  /* Buffer plus grand pour détecter un dépassement */
+    uint8_t buffer[TX_CBOR_MAX_SIZE];
     size_t len = 0;
     esp_err_t err = tx_serialize_full(&tx, buffer, sizeof(buffer), &len);
 
     TEST_ASSERT_EQUAL(ESP_OK, err);
     TEST_ASSERT_LESS_OR_EQUAL(TX_CBOR_MAX_SIZE, len);
+    /* Garde-fou anti-régression : si la taille bondit > 310, c'est
+     * qu'un champ a été ajouté sans bump de TX_CBOR_MAX_SIZE. */
+    TEST_ASSERT_LESS_OR_EQUAL(310, len);
 }
 
 /**
@@ -280,7 +293,7 @@ TEST_CASE("validate_structure_succes", "[transaction]")
     make_dummy_hash(&parent, 0xAA);
 
     transaction_t tx;
-    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 0, &parent, 1, 1000);
+    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 1, &parent, 1, 1000);
 
     TEST_ASSERT_EQUAL(ESP_OK, tx_validate_structure(&tx));
 }
@@ -298,7 +311,7 @@ TEST_CASE("validate_structure_transfer_from_nul", "[transaction]")
     make_dummy_hash(&parent, 0xAA);
 
     transaction_t tx;
-    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 0, &parent, 1, 1000);
+    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 1, &parent, 1, 1000);
 
     /* Corrompre le champ from */
     memset(&tx.from, 0, sizeof(public_key_t));
@@ -322,7 +335,7 @@ TEST_CASE("validate_signature_transfer_succes", "[transaction]")
     make_dummy_hash(&parent, 0xAA);
 
     transaction_t tx;
-    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 0, &parent, 1, 1000);
+    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 1, &parent, 1, 1000);
 
     TEST_ASSERT_EQUAL(ESP_OK, tx_validate_signature(&tx));
 }
@@ -366,7 +379,7 @@ TEST_CASE("validate_signature_montant_modifie", "[transaction]")
     make_dummy_hash(&parent, 0xAA);
 
     transaction_t tx;
-    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 0, &parent, 1, 1000);
+    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 1, &parent, 1, 1000);
 
     /* Modifier le montant après signature */
     tx.amount = 999;
@@ -440,7 +453,7 @@ TEST_CASE("validate_master_transfer_skip", "[transaction]")
     make_dummy_hash(&parent, 0xDD);
 
     transaction_t tx;
-    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 0, &parent, 1, 1000);
+    tx_create_transfer(&tx, &alice, &bob.public_key, 100, 0, 0, 1, &parent, 1, 1000);
 
     master_keys_t mk = {
         .keys = &alice.public_key,
@@ -449,4 +462,135 @@ TEST_CASE("validate_master_transfer_skip", "[transaction]")
 
     /* Doit retourner OK sans vérification */
     TEST_ASSERT_EQUAL(ESP_OK, tx_validate_master(&tx, &mk));
+}
+
+/* ========================================================================= */
+/*    Tests de régression — audit 2026-05-16 (F-TX-001/003/005/007/009)       */
+/* ========================================================================= */
+
+/**
+ * [F-TX-003] tx_validate_structure rejette TRANSFER avec fee >= amount.
+ */
+TEST_CASE("validate_structure_rejects_fee_ge_amount", "[transaction]")
+{
+    keypair_t alice, bob;
+    crypto_generate_keypair(&alice);
+    crypto_generate_keypair(&bob);
+
+    hash_t parent;
+    make_dummy_hash(&parent, 0xA1);
+
+    transaction_t tx;
+    /* fee == amount : rejeté. */
+    tx_create_transfer(&tx, &alice, &bob.public_key,
+                       100, 0, 100, 5, &parent, 1, 1000);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, tx_validate_structure(&tx));
+
+    /* fee > amount : rejeté. */
+    tx_create_transfer(&tx, &alice, &bob.public_key,
+                       100, 0, 200, 5, &parent, 1, 1000);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, tx_validate_structure(&tx));
+
+    /* fee < amount : accepté. */
+    tx_create_transfer(&tx, &alice, &bob.public_key,
+                       100, 0, 99, 5, &parent, 1, 1000);
+    TEST_ASSERT_EQUAL(ESP_OK, tx_validate_structure(&tx));
+}
+
+/**
+ * [F-TX-005] tx_validate_structure rejette TRANSFER avec seq == 0.
+ */
+TEST_CASE("validate_structure_rejects_transfer_seq_zero", "[transaction]")
+{
+    keypair_t alice, bob;
+    crypto_generate_keypair(&alice);
+    crypto_generate_keypair(&bob);
+
+    hash_t parent;
+    make_dummy_hash(&parent, 0xA2);
+
+    transaction_t tx;
+    tx_create_transfer(&tx, &alice, &bob.public_key,
+                       100, 0, 0, 0, &parent, 1, 1000);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, tx_validate_structure(&tx));
+
+    /* MINT seq == 0 reste autorisé (genesis). */
+    transaction_t mint_tx;
+    tx_create_mint(&mint_tx, &alice, &bob.public_key, 100, 0, 0, &parent, 1, 1000);
+    /* mint_tx.seq == 0 par défaut (paramètre seq de tx_create_mint). */
+    TEST_ASSERT_EQUAL(ESP_OK, tx_validate_structure(&mint_tx));
+}
+
+/**
+ * [F-TX-009] tx_validate_structure rejette une TX avec un parent nul
+ * dans un slot < parent_count.
+ */
+TEST_CASE("validate_structure_rejects_null_parent_in_count", "[transaction]")
+{
+    keypair_t alice, bob;
+    crypto_generate_keypair(&alice);
+    crypto_generate_keypair(&bob);
+
+    hash_t parents[2];
+    make_dummy_hash(&parents[0], 0xB1);
+    /* parents[1] reste à zéro. */
+    memset(&parents[1], 0, sizeof(hash_t));
+
+    transaction_t tx;
+    tx_create_transfer(&tx, &alice, &bob.public_key,
+                       100, 0, 0, 5, parents, 2, 1000);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, tx_validate_structure(&tx));
+}
+
+/**
+ * [F-TX-007] tx_deserialize rejette un CBOR avec un tableau de parents
+ * dépassant TX_MAX_PARENTS (silencieusement tronqué auparavant).
+ *
+ * Note : ce test exerce la garde via un CBOR construit à la main.
+ */
+TEST_CASE("deserialize_rejects_parents_overflow", "[transaction]")
+{
+    /*
+     * Forger un CBOR avec un tableau de 3 parents (> TX_MAX_PARENTS = 2).
+     * Map de 1 entrée { CBOR_KEY_PARENTS: [bstr32, bstr32, bstr32] }.
+     */
+    uint8_t buf[256];
+    size_t off = 0;
+    buf[off++] = 0xA1; /* map(1) */
+    buf[off++] = 0x05; /* clé 5 = CBOR_KEY_PARENTS */
+    buf[off++] = 0x83; /* array(3) */
+    for (int i = 0; i < 3; i++) {
+        buf[off++] = 0x58; /* bstr suivant uint8 longueur */
+        buf[off++] = 0x20; /* 32 octets */
+        memset(buf + off, 0xAA + i, 32);
+        off += 32;
+    }
+
+    transaction_t tx;
+    esp_err_t err = tx_deserialize(buf, off, &tx);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+}
+
+/**
+ * [F-TX-001] tx_deserialize rejette un CBOR avec un champ amount
+ * encodé comme byte string au lieu de uint (injection via mismatch
+ * de type). Sans la garde READ_UINT64_OR_FAIL, en release la valeur
+ * lue serait arbitraire.
+ */
+TEST_CASE("deserialize_rejects_amount_wrong_type", "[transaction]")
+{
+    /*
+     * Map de 1 entrée { CBOR_KEY_AMOUNT (4): bstr "junk" } — type
+     * incorrect (devrait être uint).
+     */
+    uint8_t buf[32];
+    size_t off = 0;
+    buf[off++] = 0xA1;
+    buf[off++] = 0x04;
+    buf[off++] = 0x44; /* bstr de 4 octets */
+    buf[off++] = 'j'; buf[off++] = 'u'; buf[off++] = 'n'; buf[off++] = 'k';
+
+    transaction_t tx;
+    esp_err_t err = tx_deserialize(buf, off, &tx);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
 }

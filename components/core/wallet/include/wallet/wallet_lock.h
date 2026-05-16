@@ -96,13 +96,26 @@ esp_err_t lock_table_cancel(lock_table_t *table, const hash_t *tx_id);
 /**
  * @brief Vérifie et expire les verrous dépassant le timeout.
  *
- * Parcourt la table et annule automatiquement les verrous dont
- * le timestamp de création + WALLET_LOCK_TIMEOUT_MS < temps courant.
- * Les tx_id des verrous expirés sont copiés dans expired_ids pour
- * permettre au core_task de marquer les TX comme CANCELLED dans le DAG.
+ * Parcourt la table et supprime les entrées dont le timestamp de
+ * création + WALLET_LOCK_TIMEOUT_MS < temps courant. Les tx_id des
+ * verrous expirés sont copiés dans `expired_ids` pour permettre au
+ * core_task de marquer les TX comme CANCELLED dans le DAG.
+ *
+ * [F-WL-003] ⚠️ Passer `expired_ids == NULL` est techniquement permis
+ * mais DANGEREUX en production : les entrées sont libérées de la
+ * table sans que l'appelant puisse appeler `dag_set_status(CANCELLED)`
+ * sur les TX correspondantes. Résultat : les TX restent LOCKED
+ * indéfiniment dans le DAG et `wallet_get_balance` continue à déduire
+ * leur montant — fonds bloqués pour toujours.
+ *
+ * En production, `core_task.c` passe toujours un buffer valide
+ * dimensionné à `WALLET_MAX_LOCKS`, donc ce mode "purge silencieuse"
+ * ne doit être utilisé qu'à des fins de test ou de réinitialisation
+ * volontaire.
  *
  * @param[in,out] table           Table des verrous
- * @param[out]    expired_ids     Tableau de sortie pour les tx_id expirés (peut être NULL)
+ * @param[out]    expired_ids     Tableau de sortie pour les tx_id expirés.
+ *                                Doit être non-NULL en production (cf. avertissement).
  * @param[in]     max_expired     Taille du tableau expired_ids (ignoré si expired_ids == NULL)
  * @param[out]    expired_count   Nombre de verrous expirés (peut être NULL)
  * @return ESP_OK en cas de succès

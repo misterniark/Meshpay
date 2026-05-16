@@ -63,11 +63,12 @@ uint32_t currency_melt_apply(const currency_config_t *config,
     }
 
     /*
-     * [H5] Garde pour melt_bps > 10000 : valeur invalide qui provoquerait
-     * un underflow sur le calcul (10000 - melt_bps). On retourne 0 car
-     * une fonte supérieure à 100% signifie que tout le solde est fondu.
+     * [H5] Garde pour melt_bps > CURRENCY_BPS_SCALE : valeur invalide qui
+     * provoquerait un underflow sur le calcul (BASE - melt_bps). On retourne
+     * 0 car une fonte supérieure à 100% signifie que tout le solde est fondu.
      */
-    if (config->melt_volume_mode == MELT_MODE_BPS && config->melt_bps > 10000) {
+    if (config->melt_volume_mode == MELT_MODE_BPS &&
+        config->melt_bps > CURRENCY_BPS_SCALE) {
         return 0;
     }
 
@@ -76,16 +77,16 @@ uint32_t currency_melt_apply(const currency_config_t *config,
     if (config->melt_volume_mode == MELT_MODE_BPS) {
         /*
          * Mode BPS : appliquer les ticks séquentiellement.
-         * Chaque tick : current = current - (current * bps / 10000)
-         *             = current * (10000 - bps) / 10000
+         * Chaque tick : current = current - (current * bps / SCALE)
+         *             = current * (SCALE - bps) / SCALE
          *
          * On boucle pour chaque tick (composé). Le plafond de
          * MELT_MAX_CATCHUP_TICKS (365) garantit que cette boucle
          * reste raisonnable.
          */
-        uint32_t factor = 10000 - config->melt_bps;
+        uint32_t factor = CURRENCY_BPS_SCALE - config->melt_bps;
         for (uint32_t i = 0; i < ticks && current > 0; i++) {
-            current = (current * factor) / 10000;
+            current = (current * factor) / CURRENCY_BPS_SCALE;
         }
     } else {
         /*
@@ -108,15 +109,29 @@ uint64_t currency_melt_next_timestamp(const currency_config_t *config,
                                       uint32_t ticks,
                                       uint64_t current_time)
 {
-    if (!config || ticks == 0) {
+    /*
+     * [F-CU-005] Garde sur melt_period_seconds == 0 ajoutée pour symétrie
+     * avec currency_melt_ticks_due. Sans cette garde, un appel direct à
+     * currency_melt_next_timestamp avec une config malformée ferait
+     * advance = 0 et le timestamp ne progresserait jamais — la fonte
+     * boucle indéfiniment au prochain checkpoint.
+     */
+    if (!config || ticks == 0 || config->melt_period_seconds == 0) {
         return last_melt_timestamp;
     }
 
     /*
+     * [F-CU-003] L'appelant doit garantir current_time monotone non
+     * décroissant par rapport à last_melt_timestamp. Sans cet invariant,
+     * le plafonnement `new_ts = current_time` ancre la référence sur
+     * une horloge régressée et provoque des ticks en double au prochain
+     * cycle. dag_glue.c capture `now` une seule fois et le transmet à
+     * ticks_due puis à next_timestamp, donc l'invariant est respecté.
+     *
      * Avancer le timestamp de référence du nombre exact de ticks appliqués.
-     * Pas de current_time ici : on avance de ticks * period pour que le
-     * prochain calcul de ticks_due soit correct (le reste du temps
-     * écoulé sera comptabilisé au prochain appel).
+     * On avance de ticks * period pour que le prochain calcul de ticks_due
+     * soit correct (le reste du temps écoulé sera comptabilisé au prochain
+     * appel).
      */
     uint64_t advance = (uint64_t)ticks * (uint64_t)config->melt_period_seconds * 1000ULL;
     uint64_t new_ts = last_melt_timestamp + advance;

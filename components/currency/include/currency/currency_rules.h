@@ -176,4 +176,27 @@ currency_err_t currency_validate(const currency_config_t *config,
                                  uint64_t total_minted,
                                  uint64_t last_transfer_time);
 
+/**
+ * Vérifier l'intégrité d'une `currency_config_t` chargée depuis NVS.
+ *
+ * [F-CU-006] À appeler systématiquement après tout chargement de la
+ * config depuis le stockage persistant. Une config corrompue peut
+ * provoquer :
+ *  - effacement silencieux des soldes (`melt_bps > 10000` → fonte > 100%)
+ *  - accès OOB sur `mint_authorities[]` si `mint_authority_count` excède
+ *    `CURRENCY_MAX_MINT_AUTHORITIES`
+ *  - boucle infinie de ticks si `melt_period_seconds == 0` avec
+ *    `melt_enabled == true`
+ *
+ * Les invariants vérifiés :
+ *   - `mint_authority_count <= CURRENCY_MAX_MINT_AUTHORITIES`
+ *   - `melt_bps <= 10000` (CURRENCY_BPS_SCALE)
+ *   - Si `melt_enabled == true`, alors `melt_period_seconds > 0`
+ *   - `min_transfer_amount <= max_transfer_amount` (sauf si max == 0)
+ *
+ * @param config Configuration à valider
+ * @return CURRENCY_OK ou CURRENCY_ERR_* si invariant violé
+ */
+currency_err_t currency_config_validate(const currency_config_t *config);
+
 #endif /* CURRENCY_RULES_H */

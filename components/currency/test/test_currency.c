@@ -347,6 +347,30 @@ TEST_CASE("melt_ticks_due_capped", "[currency]")
 }
 
 /**
+ * [F-CU-010] Test : Melt apply BPS sur 365 ticks de rattrapage max.
+ *
+ * Couvre le pire cas (device éteint un an avec melt_period = 1 jour).
+ * Calculé en intégrant la troncature entière à chaque tick :
+ *   current_{n+1} = (current_n * 9900) // 10000
+ * Référence : python3 -c "c=10000\nfor _ in range(365): c=(c*9900)//10000\nprint(c)"
+ * → 207.
+ *
+ * Ce test remplace le `melt_catchup_plafonne_365` historique qui avait
+ * été désactivé (valeur attendue incorrecte). Préserve la régression
+ * sur la formule composée la plus sensible.
+ */
+TEST_CASE("melt_apply_bps_365_ticks_catchup", "[currency]")
+{
+    currency_config_t cfg = make_default_config();
+    cfg.melt_enabled = true;
+    cfg.melt_volume_mode = MELT_MODE_BPS;
+    cfg.melt_bps = 100; /* 1% par tick */
+
+    uint32_t result = currency_melt_apply(&cfg, 10000, MELT_MAX_CATCHUP_TICKS);
+    TEST_ASSERT_EQUAL_UINT32(207, result);
+}
+
+/**
  * Test 16 : Melt apply BPS — 1% par tick, 3 ticks.
  */
 TEST_CASE("melt_apply_bps", "[currency]")
@@ -422,4 +446,99 @@ TEST_CASE("melt_next_timestamp", "[currency]")
     /* 0 ticks → pas de changement */
     next = currency_melt_next_timestamp(&cfg, last, 0, now);
     TEST_ASSERT_EQUAL_UINT64(last, next);
+}
+
+/**
+ * [F-CU-005] Test : currency_melt_next_timestamp avec melt_period_seconds = 0.
+ *
+ * Garde-fou contre les configs corrompues : appel direct (sans passer
+ * par ticks_due) doit retourner last sans modification.
+ */
+TEST_CASE("melt_next_timestamp_period_zero_returns_last", "[currency]")
+{
+    currency_config_t cfg = make_default_config();
+    cfg.melt_enabled = true;
+    cfg.melt_period_seconds = 0;
+
+    uint64_t last = 12345;
+    uint64_t next = currency_melt_next_timestamp(&cfg, last, 5, 99999);
+    TEST_ASSERT_EQUAL_UINT64(last, next);
+}
+
+/* ================================================================
+ * Tests currency_config_validate (F-CU-006)
+ * ================================================================ */
+
+/**
+ * [F-CU-006] Test : config valide acceptée.
+ */
+TEST_CASE("config_validate_default_ok", "[currency]")
+{
+    currency_config_t cfg = make_default_config();
+    TEST_ASSERT_EQUAL(CURRENCY_OK, currency_config_validate(&cfg));
+}
+
+/**
+ * [F-CU-006] Test : mint_authority_count > MAX rejeté.
+ */
+TEST_CASE("config_validate_authority_count_overflow", "[currency]")
+{
+    currency_config_t cfg = make_default_config();
+    cfg.mint_authority_count = CURRENCY_MAX_MINT_AUTHORITIES + 1;
+    TEST_ASSERT_EQUAL(CURRENCY_ERR_NOT_AUTHORITY,
+                      currency_config_validate(&cfg));
+}
+
+/**
+ * [F-CU-006] Test : melt_bps > 10000 rejeté.
+ */
+TEST_CASE("config_validate_melt_bps_overflow", "[currency]")
+{
+    currency_config_t cfg = make_default_config();
+    cfg.melt_bps = CURRENCY_BPS_SCALE + 1;
+    TEST_ASSERT_EQUAL(CURRENCY_ERR_WRONG_ID, currency_config_validate(&cfg));
+}
+
+/**
+ * [F-CU-006] Test : melt_enabled avec melt_period_seconds = 0 rejeté.
+ */
+TEST_CASE("config_validate_melt_enabled_period_zero", "[currency]")
+{
+    currency_config_t cfg = make_default_config();
+    cfg.melt_enabled = true;
+    cfg.melt_period_seconds = 0;
+    TEST_ASSERT_EQUAL(CURRENCY_ERR_WRONG_ID, currency_config_validate(&cfg));
+}
+
+/**
+ * [F-CU-006] Test : min > max transfer_amount rejeté.
+ */
+TEST_CASE("config_validate_min_gt_max_transfer", "[currency]")
+{
+    currency_config_t cfg = make_default_config();
+    cfg.min_transfer_amount = 1000;
+    cfg.max_transfer_amount = 100;
+    TEST_ASSERT_EQUAL(CURRENCY_ERR_AMOUNT_TOO_HIGH,
+                      currency_config_validate(&cfg));
+}
+
+/**
+ * [F-CU-006] Test : config NULL rejetée.
+ */
+TEST_CASE("config_validate_null", "[currency]")
+{
+    TEST_ASSERT_EQUAL(CURRENCY_ERR_NULL_PARAM, currency_config_validate(NULL));
+}
+
+/**
+ * [F-CU-004] Test : currency_check_mint_authority avec count=0 retourne
+ * NOT_AUTHORITY (et non OK ou crash).
+ */
+TEST_CASE("mint_authority_count_zero_rejects", "[currency]")
+{
+    currency_config_t cfg = make_default_config();
+    cfg.mint_authority_count = 0;
+    public_key_t any_key = {0};
+    TEST_ASSERT_EQUAL(CURRENCY_ERR_NOT_AUTHORITY,
+                      currency_check_mint_authority(&cfg, &any_key));
 }

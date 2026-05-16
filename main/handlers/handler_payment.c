@@ -59,6 +59,25 @@ void handle_tx_received(const comm_event_t *evt)
         return;
     }
 
+    /*
+     * [F-CU-001] Vérification explicite de l'autorité MINT.
+     *
+     * `currency_validate` est partielle (cf. [H6] header) et ne vérifie
+     * pas que le signataire d'un MINT est une autorité reconnue.
+     * `dag_merge_transaction` rattrape cette garde via `tx_validate_master`,
+     * mais le couplage est implicite. On vérifie ici directement
+     * l'autorité avant le merge pour rendre la chaîne de validation
+     * explicite et à l'épreuve d'un refactoring qui changerait le chemin
+     * en aval.
+     */
+    if (rx_tx->type == TX_TYPE_MINT) {
+        cerr = currency_check_mint_authority(&s_currency, &rx_tx->from);
+        if (cerr != CURRENCY_OK) {
+            ESP_LOGW(TAG, "TX MINT recue : signataire non autorite (%d)", cerr);
+            return;
+        }
+    }
+
     master_keys_t mk = {
         .keys  = s_currency.mint_authorities,
         .count = s_currency.mint_authority_count,

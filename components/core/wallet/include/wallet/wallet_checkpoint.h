@@ -18,8 +18,19 @@
 #include "esp_err.h"
 #include <stdint.h>
 
-/** Nombre maximum de comptes dans un checkpoint */
-#define CHECKPOINT_MAX_ACCOUNTS 64
+/**
+ * Nombre maximum de comptes dans un checkpoint.
+ *
+ * [F-WL-010] Dimensionné pour absorber un DAG plein de TX impliquant
+ * des identités distinctes, soit `DAG_MAX_TRANSACTIONS = 250`. Au-delà,
+ * `checkpoint_create` retourne `ESP_ERR_NO_MEM` et le DAG ne peut plus
+ * être élagué — d'où la nécessité d'aligner les deux capacités.
+ *
+ * Coût mémoire : 250 × (32 + 4) octets ≈ 9 Ko par checkpoint, stocké
+ * en BSS dans `s_checkpoint`. NVS supporte des blobs de cette taille
+ * via chunking interne transparent.
+ */
+#define CHECKPOINT_MAX_ACCOUNTS 250
 
 /**
  * @brief Entrée d'un checkpoint : association clé publique → solde.
@@ -75,17 +86,55 @@ typedef esp_err_t (*checkpoint_load_fn)(checkpoint_t *checkpoint, void *ctx);
  * fourni (non-NULL et non-zéro). Sinon, ils sont brûlés (détruits,
  * retirés de la masse monétaire).
  *
- * @param[in]  dag            DAG source
- * @param[in]  base           Checkpoint précédent (NULL si premier checkpoint).
- *                            Les soldes du base sont utilisés comme point de départ.
- * @param[in]  fee_recipient  Clé du destinataire des frais (NULL = fees brûlés).
- * @param[out] checkpoint     Checkpoint créé
+ * [F-WL-001] Acquiert le mutex récursif du DAG pendant toute la durée
+ * du parcours pour garantir l'atomicité vs un `dag_merge_transaction`
+ * concurrent (tâche LoRa). Le mutex étant récursif, l'appel reste sûr
+ * même si l'appelant le détient déjà.
+ *
+ * [F-WL-006] Les `accounts[]` sont triés par clé publique (ordre
+ * lexicographique) après construction, pour produire un checkpoint
+ * structurellement déterministe entre devices. Préparation pour un
+ * éventuel mécanisme de consensus inter-pairs.
+ *
+ * [F-WL-007] `last_melt_timestamp` est propagé depuis `base` vers le
+ * nouveau checkpoint. Le mécanisme de fonte est actuellement désactivé
+ * (cf. F-CU-002 dans dag_glue.c) mais le champ est conservé pour une
+ * future réactivation.
+ *
+ * [F-WL-004] En cas d'échec (`ESP_ERR_NO_MEM` ou `ESP_ERR_INVALID_STATE`),
+ * `out_failed_tx_id` est rempli avec l'ID de la TX qui a provoqué l'échec
+ * pour permettre à l'appelant de la marquer CANCELLED et débloquer
+ * l'élagage. Si NULL, l'identifiant n'est pas remonté.
+ *
+ * @param[in]  dag              DAG source
+ * @param[in]  base             Checkpoint précédent (NULL si premier checkpoint).
+ *                              Les soldes du base sont utilisés comme point de départ.
+ * @param[in]  fee_recipient    Clé du destinataire des frais (NULL = fees brûlés).
+ * @param[out] checkpoint       Checkpoint créé
+ * @param[out] out_failed_tx_id ID de la TX fautive en cas d'échec (peut être NULL).
+ *                              Remplie uniquement si retour != ESP_OK et que la
+ *                              cause est identifiable (overflow, saturation).
  * @return ESP_OK en cas de succès
  *         ESP_ERR_NO_MEM si trop de comptes (> CHECKPOINT_MAX_ACCOUNTS)
+ *         ESP_ERR_INVALID_STATE si une TX provoque un overflow de solde
  */
 esp_err_t checkpoint_create(const dag_t *dag, const checkpoint_t *base,
                             const public_key_t *fee_recipient,
                             checkpoint_t *checkpoint);
+
+/**
+ * @brief Variante étendue de `checkpoint_create` qui remonte l'ID de
+ *        la TX fautive en cas d'échec.
+ *
+ * [F-WL-004] Permet à l'appelant (`auto_checkpoint_if_needed`) de
+ * marquer la TX problématique comme CANCELLED pour débloquer
+ * l'élagage. La sémantique est identique à `checkpoint_create` ;
+ * `out_failed_tx_id` peut être NULL pour ignorer cette information.
+ */
+esp_err_t checkpoint_create_ext(const dag_t *dag, const checkpoint_t *base,
+                                const public_key_t *fee_recipient,
+                                checkpoint_t *checkpoint,
+                                hash_t *out_failed_tx_id);
 
 /**
  * @brief Récupère le solde d'un compte dans un checkpoint.

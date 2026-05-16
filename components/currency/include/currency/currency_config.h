@@ -37,6 +37,16 @@
 /** Taille maximale de la description de l'événement */
 #define CURRENCY_DESCRIPTION_MAX 64
 
+/**
+ * [F-CU-012] Base des basis points pour le calcul de la fonte.
+ *
+ * 10000 bps = 100 %. Un tick à `melt_bps = 100` retire 1 % du solde.
+ * Constante définie ici pour éviter la duplication de la valeur dans
+ * les boucles de calcul de fonte et garantir la cohérence si la
+ * granularité venait à changer.
+ */
+#define CURRENCY_BPS_SCALE 10000U
+
 /* ================================================================
  * Mode de fonte
  * ================================================================ */

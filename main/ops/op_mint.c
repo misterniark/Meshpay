@@ -29,11 +29,16 @@ esp_err_t initiate_mint(const public_key_t *to, uint32_t amount)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /*
+     * [F-CU-009] Utiliser public_key_equal (temps constant) au lieu de
+     * memcmp pour la comparaison de clés publiques. Comportement
+     * fonctionnel identique mais aligné avec la convention de sécurité
+     * établie dans le reste du projet (cf. crypto_types.h).
+     */
     bool is_master = false;
     for (uint8_t i = 0; i < s_currency.mint_authority_count; i++) {
-        if (memcmp(s_keypair.public_key.bytes,
-                   s_currency.mint_authorities[i].bytes,
-                   CRYPTO_PUBLIC_KEY_SIZE) == 0) {
+        if (public_key_equal(&s_keypair.public_key,
+                             &s_currency.mint_authorities[i])) {
             is_master = true;
             break;
         }

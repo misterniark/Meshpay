@@ -141,6 +141,18 @@ esp_err_t tx_serialize_signable(const transaction_t *tx,
     if (err != CborNoError) return ESP_ERR_NO_MEM;
 
     *out_len = cbor_encoder_get_buffer_size(&encoder, buffer);
+
+    /*
+     * [F-TX-002] Garde de débordement par symétrie avec tx_serialize_full.
+     * Tinycbor en mode "computation only" peut écrire au-delà du buffer
+     * avant que close_container retourne CborErrorOutOfMemory. Sans ce
+     * check, un payload signable > buffer_len corromprait la stack
+     * (le buffer est typiquement TX_CBOR_MAX_SIZE = 320 sur la stack
+     * dans `finalize_transaction`).
+     */
+    if (*out_len > buffer_len) {
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }
 
@@ -218,6 +230,20 @@ esp_err_t tx_deserialize(const uint8_t *buffer, size_t buffer_len,
     err = cbor_value_enter_container(&root, &map_iter);
     if (err != CborNoError) return ESP_ERR_INVALID_ARG;
 
+    /*
+     * [F-TX-001] Helper inline pour lire un uint64 CBOR avec garde de
+     * type. Sans cette garde, en release (NDEBUG), `cbor_value_get_uint64`
+     * lit un entier arbitraire sur un champ malformé (bstring au lieu
+     * de uint), permettant à un attaquant LoRa d'injecter des valeurs
+     * arbitraires dans amount/fee/seq/etc.
+     */
+    #define READ_UINT64_OR_FAIL(iter, out_val) do { \
+        if (!cbor_value_is_unsigned_integer(iter)) { \
+            return ESP_ERR_INVALID_ARG; \
+        } \
+        cbor_value_get_uint64((iter), (out_val)); \
+    } while (0)
+
     /* Parcourir toutes les paires clé/valeur de la map */
     while (!cbor_value_at_end(&map_iter)) {
         /* Lire la clé (entier) */
@@ -225,7 +251,12 @@ esp_err_t tx_deserialize(const uint8_t *buffer, size_t buffer_len,
         if (!cbor_value_is_integer(&map_iter)) {
             return ESP_ERR_INVALID_ARG;
         }
-        cbor_value_get_int(&map_iter, &key);
+        /*
+         * [F-TX-010] `_checked` propage CborErrorDataTooLarge si la clé
+         * dépasse INT_MAX (au lieu de tronquer silencieusement).
+         */
+        err = cbor_value_get_int_checked(&map_iter, &key);
+        if (err != CborNoError) return ESP_ERR_INVALID_ARG;
         err = cbor_value_advance_fixed(&map_iter);
         if (err != CborNoError) return ESP_ERR_INVALID_ARG;
 
@@ -233,7 +264,7 @@ esp_err_t tx_deserialize(const uint8_t *buffer, size_t buffer_len,
         switch (key) {
         case CBOR_KEY_TYPE: {
             uint64_t val;
-            cbor_value_get_uint64(&map_iter, &val);
+            READ_UINT64_OR_FAIL(&map_iter, &val);
             tx->type = (tx_type_t)val;
             err = cbor_value_advance_fixed(&map_iter);
             break;
@@ -250,7 +281,7 @@ esp_err_t tx_deserialize(const uint8_t *buffer, size_t buffer_len,
         }
         case CBOR_KEY_AMOUNT: {
             uint64_t val;
-            cbor_value_get_uint64(&map_iter, &val);
+            READ_UINT64_OR_FAIL(&map_iter, &val);
             /* Protection contre la troncature uint64→uint32 : un montant
              * dépassant UINT32_MAX serait silencieusement tronqué, ce qui
              * pourrait être exploité par un attaquant. */
@@ -275,12 +306,22 @@ esp_err_t tx_deserialize(const uint8_t *buffer, size_t buffer_len,
                 if (err != CborNoError) break;
                 tx->parent_count++;
             }
+            /*
+             * [F-TX-007] Si le tableau CBOR contenait plus que TX_MAX_PARENTS
+             * éléments, on ne les a pas tous lus — on rejette la TX au lieu
+             * de la tronquer silencieusement. Sans ce check, un CBOR forgé
+             * avec N+1 parents passerait avec seulement N parents lus, créant
+             * une ambiguïté entre le CBOR reçu et la TX traitée.
+             */
+            if (err == CborNoError && !cbor_value_at_end(&array_iter)) {
+                return ESP_ERR_INVALID_ARG;
+            }
             err = cbor_value_leave_container(&map_iter, &array_iter);
             break;
         }
         case CBOR_KEY_TIMESTAMP: {
             uint64_t val;
-            cbor_value_get_uint64(&map_iter, &val);
+            READ_UINT64_OR_FAIL(&map_iter, &val);
             tx->timestamp = val;
             err = cbor_value_advance_fixed(&map_iter);
             break;
@@ -314,14 +355,14 @@ esp_err_t tx_deserialize(const uint8_t *buffer, size_t buffer_len,
              * mais on ne l'utilise pas.
              */
             uint64_t val;
-            cbor_value_get_uint64(&map_iter, &val);
+            READ_UINT64_OR_FAIL(&map_iter, &val);
             (void)val;  /* Valeur réseau ignorée intentionnellement */
             err = cbor_value_advance_fixed(&map_iter);
             break;
         }
         case CBOR_KEY_CURRENCY: {
             uint64_t val;
-            cbor_value_get_uint64(&map_iter, &val);
+            READ_UINT64_OR_FAIL(&map_iter, &val);
             /* Protection contre la troncature uint64→uint32 : un currency_id
              * dépassant UINT32_MAX serait silencieusement tronqué. */
             if (val > UINT32_MAX) {
@@ -338,7 +379,7 @@ esp_err_t tx_deserialize(const uint8_t *buffer, size_t buffer_len,
              * reste à 0 grâce au memset initial (rétrocompatibilité).
              */
             uint64_t val;
-            cbor_value_get_uint64(&map_iter, &val);
+            READ_UINT64_OR_FAIL(&map_iter, &val);
             /* Protection contre la troncature uint64→uint32 */
             if (val > UINT32_MAX) {
                 return ESP_ERR_INVALID_ARG;
@@ -355,7 +396,7 @@ esp_err_t tx_deserialize(const uint8_t *buffer, size_t buffer_len,
              * ascendante est preservee.
              */
             uint64_t val;
-            cbor_value_get_uint64(&map_iter, &val);
+            READ_UINT64_OR_FAIL(&map_iter, &val);
             if (val > UINT32_MAX) {
                 return ESP_ERR_INVALID_ARG;
             }

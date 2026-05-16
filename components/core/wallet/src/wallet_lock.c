@@ -30,6 +30,21 @@ esp_err_t lock_table_lock(lock_table_t *table, const hash_t *tx_id, uint32_t amo
         return ESP_ERR_INVALID_ARG;
     }
 
+    /*
+     * [F-WL-009] Rejeter explicitement un tx_id déjà présent dans la
+     * table. Sans cette garde, un double appel (replay d'event, bug
+     * dans le handler) créerait deux entrées actives pour la même TX,
+     * doublant le montant verrouillé et bloquant deux slots. En
+     * production, `dag_insert` rejette les TX dupliquées en amont,
+     * mais on ne suppose pas cette protection ici.
+     */
+    for (int i = 0; i < WALLET_MAX_LOCKS; i++) {
+        if (table->entries[i].active &&
+            hash_equal(&table->entries[i].tx_id, tx_id)) {
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+
     /* Chercher un slot libre dans la table */
     for (int i = 0; i < WALLET_MAX_LOCKS; i++) {
         if (!table->entries[i].active) {

@@ -7,8 +7,13 @@
 
 #include <string.h>
 
+#include "esp_log.h"
+
 #include "app_state.h"
 #include "currency/currency_config.h"
+#include "currency/currency_rules.h"
+
+static const char *TAG = "currency_init";
 
 void init_currency_config(void)
 {
@@ -44,4 +49,17 @@ void init_currency_config(void)
     memcpy(&s_currency.mint_authorities[0], &s_keypair.public_key,
            sizeof(public_key_t));
     s_currency.mint_authority_count = 1;
+
+    /*
+     * [F-CU-006] Filet de sécurité : valider la config produite avant
+     * de la laisser sortir. Aujourd'hui la config est hardcodée, donc
+     * une violation signale un bug dans ce fichier. Demain (chargement
+     * NVS), cette validation interceptera une config corrompue avant
+     * qu'elle n'effectue de dégâts (effacement des soldes, accès OOB).
+     */
+    currency_err_t verr = currency_config_validate(&s_currency);
+    if (verr != CURRENCY_OK) {
+        ESP_LOGE(TAG, "Config currency hardcodee invalide (err=%d) — "
+                      "bug dans init_currency_config", verr);
+    }
 }

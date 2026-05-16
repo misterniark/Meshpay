@@ -41,6 +41,15 @@ static uint32_t scan_dag_max_seq_own(void)
 
 uint32_t next_seq(void)
 {
+    /*
+     * [F-TX-005] seq == 0 est invalide pour toute TX (TRANSFER + MINT).
+     * On skippe 0 au démarrage : si s_next_seq vaut 0 (boot premier
+     * sans recovery), on commence à 1. Cohérent avec
+     * tx_validate_structure qui rejette les TRANSFER seq == 0.
+     */
+    if (s_next_seq == 0) {
+        s_next_seq = 1;
+    }
     uint32_t seq = s_next_seq;
     s_next_seq++;
     hal_err_t herr = s_storage.u32_write(NVS_NAMESPACE, NVS_KEY_NEXT_SEQ,

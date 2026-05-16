@@ -137,9 +137,18 @@ esp_err_t wallet_get_balance(const wallet_t *wallet, uint32_t base_balance,
         }
     }
 
-    /* Protection contre les soldes négatifs (ne devrait pas arriver) */
+    /*
+     * [F-WL-005] Saturer à [0, UINT32_MAX] par symétrie avec
+     * wallet_get_balance_for. Un solde négatif ne devrait jamais
+     * apparaître ; une saturation à UINT32_MAX évite la troncature
+     * silencieuse modulo 2^32 sur un cas extrême (très grande masse
+     * monétaire après cumul de MINT + base_balance).
+     */
     if (balance < 0) {
         balance = 0;
+    }
+    if (balance > UINT32_MAX) {
+        balance = UINT32_MAX;
     }
 
     *available = (uint32_t)balance;
