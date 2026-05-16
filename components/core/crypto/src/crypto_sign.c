@@ -32,6 +32,16 @@ esp_err_t crypto_sign(const uint8_t *data, size_t data_len,
     }
 
     /*
+     * [F-CR-006] Refuser un message vide. Dans Mesh Pay, une TX ne peut
+     * pas avoir un payload signable de taille 0 — `data_len == 0` indique
+     * un bug amont (`tx_serialize_signable` retournant 0 sans propager
+     * d'erreur).
+     */
+    if (data_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
      * Vérification que crypto_init() a été appelé au démarrage.
      * Garde maintenue pour respecter l'invariant C6 même si Monocypher
      * ne necessite plus d'init globale (pas d'etat partage interne).
@@ -59,6 +69,15 @@ esp_err_t crypto_verify(const uint8_t *data, size_t data_len,
                         const public_key_t *pubkey, const signature_t *signature)
 {
     if (data == NULL || pubkey == NULL || signature == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
+     * [F-CR-006] Refuser un message vide. Cohérent avec `crypto_sign` :
+     * une signature valide pour un message vide est suspecte dans Mesh
+     * Pay (bug amont qui aurait produit cette signature).
+     */
+    if (data_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 

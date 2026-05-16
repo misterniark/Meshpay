@@ -127,7 +127,15 @@
 #define LOCK_EXPIRE_INTERVAL_MS   5000
 
 /** Capacite max de la table des peers. */
-#define MAX_PEERS  10
+/*
+ * [F-MN-011] Augmenté de 10 à 32 le 2026-05-16 pour couvrir les
+ * déploiements moyens (festivals jusqu'à ~32 participants en
+ * simultané). Combiné avec une politique LRU dans peers.c, les
+ * nouveaux peers expulsent le plus ancien plutôt que d'être
+ * silencieusement rejetés.
+ * Coût mémoire : 32 × ~70 octets ≈ 2.2 Ko de BSS.
+ */
+#define MAX_PEERS  32
 
 /*
  * Pins LoRa Wio-E5 et intervalle de sync : deplaces dans transport_lora.c

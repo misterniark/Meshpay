@@ -11,8 +11,22 @@
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "nvs_init";
+
+/*
+ * [F-MN-014] Garde-fou anti-misconfig : si Flash Encryption est activée
+ * en mode RELEASE (eFuse brûlé en production) mais NVS Encryption ne
+ * l'est pas, la clé privée Ed25519 est stockée en NVS non-chiffrée.
+ * La Flash Encryption protège le stockage physique mais pas les
+ * attaques JTAG ou downgrade OTA — exposition silencieuse de
+ * l'identité du device. Le `#error` empêche la compilation de cette
+ * combinaison dangereuse en mode RELEASE.
+ */
+#if CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE
+#error "[F-MN-014] Flash Encryption RELEASE activee SANS CONFIG_NVS_ENCRYPTION — la cle privee Ed25519 serait stockee en NVS non-chiffre. Activer CONFIG_NVS_ENCRYPTION dans menuconfig avant le build production."
+#endif
 
 /* Voir nvs_init_secure.c pour le rationnel [C11]. */
 static void lock_pin_counter_after_erase(void)

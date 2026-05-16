@@ -194,9 +194,14 @@ esp_err_t tx_validate_master(const transaction_t *tx, const master_keys_t *maste
      * tx_validate_signature() (qui utilise tx->from comme clé de
      * vérification, y compris pour les MINT).
      */
+    /*
+     * [F-CR-007] Utiliser `public_key_equal` (temps constant) au lieu
+     * de `memcmp`. Cohérent avec la politique du projet sur les
+     * comparaisons de clés ; évite un timing oracle théorique sur la
+     * liste des maîtres autorisés.
+     */
     for (uint8_t i = 0; i < master_keys->count; i++) {
-        if (memcmp(tx->from.bytes, master_keys->keys[i].bytes,
-                   CRYPTO_PUBLIC_KEY_SIZE) == 0) {
+        if (public_key_equal(&tx->from, &master_keys->keys[i])) {
             return ESP_OK;  /* Clé maître autorisée */
         }
     }

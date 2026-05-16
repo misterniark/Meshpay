@@ -109,34 +109,39 @@ static inline bool hash_equal(const hash_t *a, const hash_t *b)
 /**
  * @brief Vérifie si une clé publique est vide (tous les octets à zéro).
  *
- * Utile pour vérifier si un champ optionnel de type public_key_t est
- * configuré (ex: fee_recipient dans wallet_t ou checkpoint_create).
+ * [F-CR-005] Implémentation en temps constant (accumulation OR),
+ * symétrique avec `public_key_equal`. Évite un timing oracle sur le
+ * nombre de zéros en tête de clé.
  *
  * @param key La clé publique à vérifier
  * @return true si la clé est entièrement nulle, false sinon
  */
 static inline bool public_key_is_zero(const public_key_t *key)
 {
-    for (int i = 0; i < CRYPTO_PUBLIC_KEY_SIZE; i++) {
-        if (key->bytes[i] != 0) return false;
+    volatile uint8_t acc = 0;
+    for (size_t i = 0; i < CRYPTO_PUBLIC_KEY_SIZE; i++) {
+        acc |= key->bytes[i];
     }
-    return true;
+    return acc == 0;
 }
 
 /**
  * @brief Vérifie si un hash est vide (tous les octets à zéro).
  *
- * Utile pour vérifier si un slot parent dans une transaction est utilisé.
+ * [F-CR-005] Implémentation en temps constant (accumulation OR), même
+ * raison que `public_key_is_zero`. Utilisé pour vérifier les slots
+ * parents dans une transaction et les checks post-prune.
  *
  * @param h Le hash à vérifier
  * @return true si le hash est entièrement nul, false sinon
  */
 static inline bool hash_is_zero(const hash_t *h)
 {
-    for (int i = 0; i < CRYPTO_HASH_SIZE; i++) {
-        if (h->bytes[i] != 0) return false;
+    volatile uint8_t acc = 0;
+    for (size_t i = 0; i < CRYPTO_HASH_SIZE; i++) {
+        acc |= h->bytes[i];
     }
-    return true;
+    return acc == 0;
 }
 
 #endif /* CRYPTO_TYPES_H */

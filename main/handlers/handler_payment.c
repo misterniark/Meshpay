@@ -203,6 +203,22 @@ void handle_attestation_received(const comm_event_t *evt)
         return;
     }
 
+    /*
+     * [F-MN-015] Vérification locale de la signature de l'attestation
+     * en défense en profondeur. La signature est normalement déjà
+     * vérifiée par `lora_sync_task` (via `comm_msg_verify_attestation`)
+     * avant que l'événement soit posté dans la queue, mais on
+     * re-vérifie ici pour fermer tout chemin alternatif (tests,
+     * injection directe). Le payload signé est exactement `tx_id`
+     * (32 octets) — voir `comm_msg.h` pour le format.
+     */
+    esp_err_t verr = crypto_verify(att->tx_id.bytes, CRYPTO_HASH_SIZE,
+                                   &att->attester_key, &att->signature);
+    if (verr != ESP_OK) {
+        ESP_LOGW(TAG, "Attestation rejetee : signature invalide");
+        return;
+    }
+
     dag_set_status(&s_dag, &att->tx_id, TX_STATUS_CONFIRMED);
     ESP_LOGI(TAG, "TX confirmée par attestation LoRa (amount=%"PRIu32")",
              tx->amount);

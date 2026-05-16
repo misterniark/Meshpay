@@ -85,11 +85,31 @@ void attempt_beneficiary_forward(void)
      */
     tx.status = TX_STATUS_CONFIRMED;
 
-    ret = dag_insert_and_track(&tx);
+    /*
+     * [F-MN-005] Décision design 2026-05-16 : passer par lock_table
+     * comme `op_payment` pour cohérence d'API et défense en profondeur.
+     * Le lock est immédiatement confirmé (TX déjà CONFIRMED) — pas de
+     * fenêtre d'attente d'ACK puisque le forward est auto-confirmé.
+     * Cela protège contre une sur-dépense théorique si un autre paiement
+     * en concurrence (même itération core_task) recalcule `total_locked`
+     * sans voir cette TX.
+     */
+    ret = lock_table_lock(&s_lock_table, &tx.id, forward_amount);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Forward: erreur insertion DAG: %d", ret);
+        ESP_LOGE(TAG, "Forward: erreur lock: %d", ret);
         return;
     }
+
+    ret = dag_insert_and_track(&tx);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Forward: erreur insertion DAG: %d — rollback lock", ret);
+        (void)lock_table_cancel(&s_lock_table, &tx.id);
+        return;
+    }
+
+    /* [F-MN-005] La TX est CONFIRMED dès l'insertion, on libère le lock
+     * immédiatement (cf. cycle confirm de lock_table). */
+    (void)lock_table_confirm(&s_lock_table, &tx.id);
 
     ESP_LOGI(TAG, "Auto-forward: %"PRIu32" credits transferes au beneficiaire",
              forward_amount);

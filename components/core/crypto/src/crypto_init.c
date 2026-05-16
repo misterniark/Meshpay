@@ -26,8 +26,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-/** Flag global indiquant si le sous-systeme crypto est initialise */
-static bool s_crypto_initialized = false;
+/**
+ * [F-CR-009] `volatile` pour garantir la visibilité inter-cœurs sur
+ * ESP32-S3 (dual-core SMP). Sans `volatile`, le compilateur peut cacher
+ * la valeur dans un registre et un cœur lirait une version obsolète
+ * après une écriture par l'autre.
+ */
+static volatile bool s_crypto_initialized = false;
 
 /** Mutex protegeant l'initialisation contre les appels concurrents */
 static SemaphoreHandle_t s_init_mutex = NULL;
@@ -38,15 +43,26 @@ static SemaphoreHandle_t s_init_mutex = NULL;
  */
 static StaticSemaphore_t s_init_mutex_buffer;
 
+/**
+ * [F-CR-001] Spinlock initialisé à compile-time pour rendre la création
+ * de `s_init_mutex` thread-safe. Sans cette protection, deux tâches
+ * concurrentes pouvaient passer le check `s_init_mutex == NULL` et
+ * appeler `xSemaphoreCreateMutexStatic` sur le même buffer, ce qui
+ * réinitialisait l'état du mutex (corruption si l'autre tâche le tenait
+ * déjà). Le spinlock protège uniquement la création initiale.
+ */
+static portMUX_TYPE s_init_spinlock = portMUX_INITIALIZER_UNLOCKED;
+
 esp_err_t crypto_init(void)
 {
     /*
-     * Creation du mutex au premier appel.
-     * Mutex statique : pas d'echec memoire possible.
+     * [F-CR-001] Création atomique du mutex sous spinlock.
      */
+    portENTER_CRITICAL(&s_init_spinlock);
     if (s_init_mutex == NULL) {
         s_init_mutex = xSemaphoreCreateMutexStatic(&s_init_mutex_buffer);
     }
+    portEXIT_CRITICAL(&s_init_spinlock);
 
     /* Acquisition du mutex avec timeout infini */
     if (xSemaphoreTake(s_init_mutex, portMAX_DELAY) != pdTRUE) {

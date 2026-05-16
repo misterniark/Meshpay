@@ -65,6 +65,20 @@ void handle_broadcast_received(const comm_event_t *evt)
         return;
     }
 
+    /*
+     * [F-MN-010] Défense en profondeur : `text_len` doit tenir dans
+     * `signed_data[1 + COMM_MSG_BROADCAST_TEXT_MAX]`. Le décodage CBOR
+     * amont (`comm_msg_unpack_broadcast`) vérifie cette borne, mais on
+     * la re-valide ici car la struct peut provenir d'autres chemins
+     * (tests, injection directe). Sans cette garde, un broadcast forgé
+     * provoquerait un débordement de stack.
+     */
+    if (bcast->text_len > COMM_MSG_BROADCAST_TEXT_MAX) {
+        ESP_LOGW(TAG, "Broadcast ignore : text_len=%u > %d",
+                 bcast->text_len, COMM_MSG_BROADCAST_TEXT_MAX);
+        return;
+    }
+
     /* Signature couvre [text_len:1][text:N]. */
     uint8_t signed_data[1 + COMM_MSG_BROADCAST_TEXT_MAX];
     signed_data[0] = bcast->text_len;

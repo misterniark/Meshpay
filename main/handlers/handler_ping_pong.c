@@ -150,6 +150,20 @@ void handle_pong_received(const comm_event_t *evt)
         return;
     }
 
+    /*
+     * [F-MN-003] Défense en profondeur : `alias_len` doit tenir dans
+     * le buffer `alias[COMM_MSG_ALIAS_MAX + 1]`. Le décodage CBOR amont
+     * vérifie déjà cette borne, mais le contrat n'est pas garanti par
+     * tous les chemins d'invocation (tests, injection directe dans la
+     * queue). Sans cette garde, un PONG malformé déborderait
+     * `s_ping_results[]` (BSS global).
+     */
+    if (pong->alias_len > COMM_MSG_ALIAS_MAX) {
+        ESP_LOGW(TAG, "PONG alias_len=%u > %d, ignore",
+                 pong->alias_len, COMM_MSG_ALIAS_MAX);
+        return;
+    }
+
     memcpy(&s_ping_results[s_ping_result_count].key,
            &pong->device_key, sizeof(public_key_t));
     memcpy(s_ping_results[s_ping_result_count].alias,

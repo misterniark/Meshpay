@@ -392,26 +392,34 @@ void app_main(void)
         return;
     }
 
-    /* HAL LoRa + lora_sync_task. */
+    /*
+     * [F-MN-002, F-MN-007] Création des queues et du mutex AVANT le
+     * démarrage de `lora_sync_task` via `transport_lora_init_and_start`.
+     *
+     * Sans cet ordre, la tâche LoRa pouvait être préemptée sur l'autre
+     * cœur et accéder à `s_evt_queue`/`s_state_mutex` encore à NULL
+     * (assert FreeRTOS). Et on vérifie tous les handles ensemble avant
+     * tout démarrage de tâche : un OOM partiel ne doit pas laisser de
+     * queue orpheline avec des tâches déjà lancées.
+     */
+    s_evt_queue   = xQueueCreate(EVT_QUEUE_DEPTH, sizeof(comm_event_t));
+    s_state_mutex = xSemaphoreCreateMutex();
+    s_cmd_queue   = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(comm_cmd_t));
+
+    if (!s_evt_queue || !s_state_mutex || !s_cmd_queue) {
+        ESP_LOGE(TAG, "Erreur creation queues/mutex (evt=%p state=%p cmd=%p)",
+                 s_evt_queue, s_state_mutex, s_cmd_queue);
+        return;
+    }
+
+    /* HAL LoRa + lora_sync_task. Les handles ci-dessus sont maintenant
+     * tous valides et lisibles depuis n'importe quel cœur. */
     (void)transport_lora_init_and_start();
 
     ESP_LOGI(TAG, "[11/12] HAL initialises (ESP-NOW%s)",
              transport_lora_available() ? " + LoRa" : "");
 
-    /* ---- 12. Queues, mutex et taches ---- */
-    s_evt_queue = xQueueCreate(EVT_QUEUE_DEPTH, sizeof(comm_event_t));
-    s_state_mutex = xSemaphoreCreateMutex();
-
-    s_cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(comm_cmd_t));
-    if (!s_cmd_queue) {
-        ESP_LOGE(TAG, "Erreur creation s_cmd_queue");
-        return;
-    }
-
-    if (!s_evt_queue || !s_state_mutex) {
-        ESP_LOGE(TAG, "Erreur creation queues/mutex");
-        return;
-    }
+    /* ---- 12. Tâches applicatives ---- */
 
     /* Configuration ESP-NOW task. ESP-NOW est present sur ESP32 + ESP32-S3
      * (les deux cibles supportees actuellement) ; pas de garde

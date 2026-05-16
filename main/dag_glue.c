@@ -36,6 +36,18 @@ void auto_checkpoint_if_needed(void)
     memset(&new_chk, 0, sizeof(new_chk));
 
     /*
+     * [F-MN-009] Sans autorité MINT configurée, le fee_recipient
+     * `mint_authorities[0]` n'a aucun sens (lecture OOB potentielle si
+     * la config est corrompue avec count=0). On passe NULL pour
+     * indiquer "fees brûlés" plutôt que d'accéder à l'index 0 d'un
+     * tableau sans contenu garanti.
+     */
+    const public_key_t *fee_recipient =
+        (s_currency.mint_authority_count > 0)
+            ? &s_currency.mint_authorities[0]
+            : NULL;
+
+    /*
      * [F-WL-004] Si checkpoint_create échoue à cause d'une TX qui
      * provoque un overflow ou sature CHECKPOINT_MAX_ACCOUNTS, on
      * récupère l'ID de la TX fautive (out param) et on la marque
@@ -44,7 +56,7 @@ void auto_checkpoint_if_needed(void)
     hash_t failed_tx_id;
     memset(&failed_tx_id, 0, sizeof(failed_tx_id));
     esp_err_t ret = checkpoint_create_ext(&s_dag, &s_checkpoint,
-                                          &s_currency.mint_authorities[0],
+                                          fee_recipient,
                                           &new_chk, &failed_tx_id);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Echec creation checkpoint automatique (%d)", ret);

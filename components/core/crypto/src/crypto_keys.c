@@ -89,10 +89,22 @@ esp_err_t crypto_export_public_key(const keypair_t *keypair, public_key_t *pubke
     return ESP_OK;
 }
 
-esp_err_t crypto_import_keypair(keypair_t *keypair, const uint8_t *privkey,
-                                const uint8_t *pubkey)
+esp_err_t crypto_import_keypair(keypair_t *keypair,
+                                const uint8_t *privkey, size_t privkey_len,
+                                const uint8_t *pubkey,  size_t pubkey_len)
 {
     if (keypair == NULL || privkey == NULL || pubkey == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
+     * [F-CR-003] Vérifier la taille des buffers contre les constantes
+     * de format. Un NVS corrompu peut produire un blob plus court ;
+     * sans ce check, le `memcpy` lirait au-delà du buffer et corromprait
+     * la keypair silencieusement.
+     */
+    if (privkey_len != CRYPTO_PRIVATE_KEY_SIZE ||
+        pubkey_len  != CRYPTO_PUBLIC_KEY_SIZE) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -126,8 +138,13 @@ esp_err_t crypto_import_keypair(keypair_t *keypair, const uint8_t *privkey,
     esp_err_t err = crypto_sign(test_msg, sizeof(test_msg) - 1, keypair, &test_sig);
     if (err != ESP_OK) {
         /* La clé privée est invalide ou incompatible, on nettoie */
+        /*
+         * [F-CR-010] Effacement uniforme via `crypto_wipe` (avec memory
+         * barrier Monocypher) au lieu de `memset` qui peut être éliminé
+         * par le compilateur sur les chemins d'erreur.
+         */
         crypto_wipe(keypair->private_key, sizeof(keypair->private_key));
-        memset(&keypair->public_key, 0, sizeof(keypair->public_key));
+        crypto_wipe(keypair->public_key.bytes, sizeof(keypair->public_key.bytes));
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -142,8 +159,13 @@ esp_err_t crypto_import_keypair(keypair_t *keypair, const uint8_t *privkey,
          * La signature ne correspond pas à la clé publique :
          * la paire de clés est incohérente.
          */
+        /*
+         * [F-CR-010] Effacement uniforme via `crypto_wipe` (avec memory
+         * barrier Monocypher) au lieu de `memset` qui peut être éliminé
+         * par le compilateur sur les chemins d'erreur.
+         */
         crypto_wipe(keypair->private_key, sizeof(keypair->private_key));
-        memset(&keypair->public_key, 0, sizeof(keypair->public_key));
+        crypto_wipe(keypair->public_key.bytes, sizeof(keypair->public_key.bytes));
         return ESP_ERR_INVALID_ARG;
     }
 

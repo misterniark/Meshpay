@@ -88,7 +88,18 @@ esp_err_t initiate_payment(const public_key_t *to, uint32_t amount)
     /* 5. Verrouiller le montant cote emetteur (sera libere a l'ACK). */
     ret = lock_table_lock(&s_lock_table, &tx.id, amount);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Erreur verrouillage: %d", ret);
+        /*
+         * [F-MN-004] Rollback DAG si le lock échoue. Sans ce rollback,
+         * la TX restait dans le DAG (status LOCKED par défaut) avec
+         * AUCUN montant verrouillé — double-dépense locale possible
+         * jusqu'à l'expiration timeout, et la TX orpheline était
+         * propagée aux peers via LoRa sync.
+         */
+        ESP_LOGE(TAG, "Erreur verrouillage: %d — rollback CANCELLED sur DAG", ret);
+        esp_err_t cret = dag_set_status(&s_dag, &tx.id, TX_STATUS_CANCELLED);
+        if (cret != ESP_OK) {
+            ESP_LOGE(TAG, "Rollback CANCELLED echoue (%d) — TX orpheline dans le DAG", cret);
+        }
         return ret;
     }
 

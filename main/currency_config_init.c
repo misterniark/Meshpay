@@ -38,8 +38,23 @@ void init_currency_config(void)
     s_currency.transfer_fee         = 0;  /* pas de frais */
     s_currency.transfer_cooldown_ms = 0;  /* pas de cooldown */
 
-    /* Fonte — appliquee uniquement en TIME_MODE_MASTER. */
-    s_currency.melt_enabled         = true;
+    /*
+     * Fonte.
+     *
+     * [F-MN-013] Cohérence avec F-CU-002 : la fonte automatique a été
+     * suspendue le 2026-05-16 en attendant la conception d'un mécanisme
+     * robuste (quorum d'application synchronisé, persistance NVS,
+     * convergence garantie en présence de devices intermittents).
+     *
+     * On désactive `melt_enabled` à la source pour que `core_task` ne
+     * tente plus d'appliquer `apply_pending_melt` au solde local (qui
+     * créait une incohérence entre l'affichage et le checkpoint NVS).
+     *
+     * Les paramètres ci-dessous sont conservés en l'état pour faciliter
+     * une réactivation propre dans un Lot dédié. Bouton facile :
+     * passer `melt_enabled = true` quand le mécanisme est prêt.
+     */
+    s_currency.melt_enabled         = false;
     s_currency.melt_period_seconds  = 86400;       /* 1 tick = 1 jour */
     s_currency.melt_volume_mode     = MELT_MODE_BPS;
     s_currency.melt_bps             = 100;          /* 1% par jour */

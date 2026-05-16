@@ -10,6 +10,7 @@
 #include "crypto/crypto_keys.h"
 #include "crypto/crypto_hash.h"
 #include "crypto/crypto_sign.h"
+#include "monocypher-ed25519.h"
 #include <string.h>
 
 /* ========================================================================= */
@@ -290,4 +291,62 @@ TEST_CASE("hash_is_zero", "[crypto]")
 
     h.bytes[15] = 1;
     TEST_ASSERT_FALSE(hash_is_zero(&h));
+}
+
+/* ========================================================================= */
+/*  [F-CR-005] public_key_is_zero — couverture manquante                      */
+/* ========================================================================= */
+
+TEST_CASE("public_key_is_zero", "[crypto]")
+{
+    public_key_t k;
+    memset(&k, 0, sizeof(k));
+    TEST_ASSERT_TRUE(public_key_is_zero(&k));
+
+    k.bytes[31] = 1;
+    TEST_ASSERT_FALSE(public_key_is_zero(&k));
+}
+
+/* ========================================================================= */
+/*  [F-CR-008] Vecteur de conformité RFC 8032 §7.1 / §A.1 — Ed25519           */
+/* ========================================================================= */
+
+/**
+ * Premier vecteur officiel Ed25519 du RFC 8032 (§7.1, "TEST 1") :
+ *   seed       = 9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae3d55
+ *   public_key = d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+ *
+ * On vérifie que `crypto_ed25519_key_pair` (Monocypher) produit la clé
+ * publique attendue à partir de la seed connue. Une régression dans
+ * Monocypher (ordre des octets, confusion seed/secret_key, hash
+ * différent) serait détectée par ce test, indépendamment de la
+ * cohérence interne sign/verify.
+ */
+TEST_CASE("ed25519_rfc8032_test1_seed_to_public_key", "[crypto]")
+{
+    const uint8_t expected_seed[32] = {
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x3d, 0x55
+    };
+    const uint8_t expected_pubkey[32] = {
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
+        0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
+        0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
+        0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a
+    };
+
+    /* Monocypher zéroise `seed` en sortie → copie modifiable. */
+    uint8_t seed_copy[32];
+    memcpy(seed_copy, expected_seed, sizeof(seed_copy));
+
+    uint8_t derived_secret[64];
+    uint8_t derived_pubkey[32];
+    crypto_ed25519_key_pair(derived_secret, derived_pubkey, seed_copy);
+
+    TEST_ASSERT_EQUAL_MEMORY(expected_pubkey, derived_pubkey, 32);
+    /* secret_key[0..31] = seed originale ; secret_key[32..63] = pubkey. */
+    TEST_ASSERT_EQUAL_MEMORY(expected_seed,   derived_secret,      32);
+    TEST_ASSERT_EQUAL_MEMORY(expected_pubkey, derived_secret + 32, 32);
 }

@@ -43,14 +43,27 @@ static const char *TAG = "tport_lora";
 
 static hal_lora_t s_lora_hal;
 
-/* Buffers de relay/pong (precedemment dans app_state.{h,c}). */
-static uint8_t  s_relay_bcast_buf[COMM_MSG_LORA_MAX];
-static size_t   s_relay_bcast_len = 0;
-static bool     s_relay_bcast_pending = false;
+/*
+ * Buffers de relay/pong (precedemment dans app_state.{h,c}).
+ *
+ * [F-MN-001] Tous les relais (broadcast, ping, pong) suivent désormais
+ * le même pattern non-bloquant : enregistrement du tick de début + delay
+ * cible à l'enregistrement, vérification par scrutation dans
+ * `transport_lora_pump()`. Avant ce fix, broadcast et ping faisaient un
+ * `vTaskDelay(200-1000 ms)` directement dans `pump()`, bloquant core_task
+ * pendant ce délai et risquant la saturation de `s_evt_queue` (16).
+ */
+static uint8_t    s_relay_bcast_buf[COMM_MSG_LORA_MAX];
+static size_t     s_relay_bcast_len = 0;
+static bool       s_relay_bcast_pending = false;
+static uint32_t   s_relay_bcast_delay_ms = 0;
+static TickType_t s_relay_bcast_start_tick = 0;
 
-static uint8_t  s_relay_ping_buf[COMM_MSG_PING_SIZE];
-static size_t   s_relay_ping_len = 0;
-static bool     s_relay_ping_pending = false;
+static uint8_t    s_relay_ping_buf[COMM_MSG_PING_SIZE];
+static size_t     s_relay_ping_len = 0;
+static bool       s_relay_ping_pending = false;
+static uint32_t   s_relay_ping_delay_ms = 0;
+static TickType_t s_relay_ping_start_tick = 0;
 
 static uint8_t    s_pong_buf[COMM_MSG_LORA_MAX];
 static size_t     s_pong_len = 0;
@@ -180,6 +193,13 @@ void transport_lora_queue_relay_broadcast(const uint8_t *buf, size_t len)
     if (len > sizeof(s_relay_bcast_buf)) return;
     memcpy(s_relay_bcast_buf, buf, len);
     s_relay_bcast_len = len;
+    /*
+     * [F-MN-001] Délai anti-collision (200-1000 ms) calculé à
+     * l'enregistrement. La scrutation dans `transport_lora_pump()`
+     * envoie quand le délai est écoulé, sans bloquer core_task.
+     */
+    s_relay_bcast_delay_ms = 200 + (esp_random() % 801);
+    s_relay_bcast_start_tick = xTaskGetTickCount();
     s_relay_bcast_pending = true;
 }
 
@@ -188,6 +208,9 @@ void transport_lora_queue_relay_ping(const uint8_t *buf, size_t len)
     if (len > sizeof(s_relay_ping_buf)) return;
     memcpy(s_relay_ping_buf, buf, len);
     s_relay_ping_len = len;
+    /* [F-MN-001] Pattern identique au broadcast. */
+    s_relay_ping_delay_ms = 200 + (esp_random() % 801);
+    s_relay_ping_start_tick = xTaskGetTickCount();
     s_relay_ping_pending = true;
 }
 
@@ -205,25 +228,31 @@ void transport_lora_queue_pong_delayed(const uint8_t *buf, size_t len,
 void transport_lora_pump(void)
 {
     /*
-     * Relay broadcast LoRa. Delai aleatoire (200-1000 ms) anti-collision :
-     * tous les devices recevant le broadcast en meme temps doivent eviter
-     * de retransmettre simultanement sur le meme canal.
+     * [F-MN-001] Relay broadcast LoRa — scrutation non-bloquante.
+     * Le délai anti-collision (200-1000 ms) a été enregistré à l'appel
+     * de `transport_lora_queue_relay_broadcast`. On envoie quand le
+     * délai est écoulé, sans bloquer core_task.
      */
     if (s_relay_bcast_pending) {
-        s_relay_bcast_pending = false;
-        uint32_t delay_ms = 200 + (esp_random() % 801);
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-        if (transport_lora_send(s_relay_bcast_buf, s_relay_bcast_len, "relay-bcast")) {
-            ESP_LOGI(TAG, "Broadcast relaye (delai=%lums)", (unsigned long)delay_ms);
+        TickType_t elapsed = xTaskGetTickCount() - s_relay_bcast_start_tick;
+        if (elapsed >= pdMS_TO_TICKS(s_relay_bcast_delay_ms)) {
+            s_relay_bcast_pending = false;
+            if (transport_lora_send(s_relay_bcast_buf, s_relay_bcast_len, "relay-bcast")) {
+                ESP_LOGI(TAG, "Broadcast relaye (delai=%lums)",
+                         (unsigned long)s_relay_bcast_delay_ms);
+            }
         }
     }
 
+    /* [F-MN-001] Relay ping LoRa — même pattern non-bloquant. */
     if (s_relay_ping_pending) {
-        s_relay_ping_pending = false;
-        uint32_t delay_ms = 200 + (esp_random() % 801);
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-        if (transport_lora_send(s_relay_ping_buf, s_relay_ping_len, "relay-ping")) {
-            ESP_LOGI(TAG, "PING relaye (delai=%lums)", (unsigned long)delay_ms);
+        TickType_t elapsed = xTaskGetTickCount() - s_relay_ping_start_tick;
+        if (elapsed >= pdMS_TO_TICKS(s_relay_ping_delay_ms)) {
+            s_relay_ping_pending = false;
+            if (transport_lora_send(s_relay_ping_buf, s_relay_ping_len, "relay-ping")) {
+                ESP_LOGI(TAG, "PING relaye (delai=%lums)",
+                         (unsigned long)s_relay_ping_delay_ms);
+            }
         }
     }
 
