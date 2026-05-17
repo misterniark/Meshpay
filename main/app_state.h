@@ -76,26 +76,29 @@
 #define UI_CMD_QUEUE_DEPTH    8
 
 /**
- * Tailles de stack des taches (en mots de 4 octets).
+ * Tailles de stack des taches ESP-IDF, en octets.
  *
- * Augmentees au Lot C item 8 suite a l'audit : espnow/lora font de la crypto
- * (Ed25519, SHA-256) + CBOR sur des buffers de plusieurs centaines d'octets.
- * core_task agrege tout le traitement metier + DAG.
+ * Attention : contrairement au FreeRTOS upstream, ESP-IDF interprete
+ * usStackDepth en octets. Les anciennes valeurs etaient documentees
+ * comme des mots de 4 octets, donc la tache LoRa recevait 6 Ko reels au
+ * lieu des 24 Ko prevus. Un cycle de sync LoRa empile crypto/CBOR et des
+ * buffers de plusieurs centaines d'octets : garder une vraie marge evite
+ * les overflows periodiques au moment du gossip.
  */
-#define ESPNOW_TASK_STACK  6144
-#define CORE_TASK_STACK   10240
-#define LORA_TASK_STACK    6144
-#define UI_TASK_STACK      8192
+#define ESPNOW_TASK_STACK  (8 * 1024)
+#define CORE_TASK_STACK    (12 * 1024)
+#define LORA_TASK_STACK    (12 * 1024)
+#define UI_TASK_STACK      (8 * 1024)
 
 /** Periode de log des high-water-marks de stack (ms). */
 #define STACK_MONITOR_PERIOD_MS  30000
 
 /**
- * Stack de la tache de monitoring.
- * Augmentee de 2048 a 4096 mots au Lot E.6 (2026-05-12) suite a un stack
- * overflow detecte sur Waveshare ESP32-S3 toutes les 30 s.
+ * Stack de la tache de monitoring, en octets.
+ * Augmentee suite a un stack overflow detecte sur Waveshare ESP32-S3
+ * toutes les 30 s.
  */
-#define STACK_MONITOR_TASK_STACK 4096
+#define STACK_MONITOR_TASK_STACK (4 * 1024)
 
 /** Priorites FreeRTOS. */
 #define ESPNOW_TASK_PRIO      7

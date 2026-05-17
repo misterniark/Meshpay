@@ -289,28 +289,34 @@ void ui_task(void *pvParam)
     lv_display_t *disp = lv_display_create(ctx->screen_w, ctx->screen_h);
 
     /*
-     * Allouer les draw buffers (double buffer, 1/10 de l'ecran) en RAM
-     * interne DMA. Le flush LCD lit ces buffers via SPI DMA : eviter la
-     * PSRAM supprime les surprises de coherence cache sur ESP32-S3.
+     * Allouer un draw buffer partiel en RAM interne DMA.
+     *
+     * Le Waveshare S3 a peu de RAM interne libre apres Wi-Fi + LoRa +
+     * stacks applicatives. Deux buffers de 1/10 d'ecran (~22 Ko) peuvent
+     * echouer et laisser l'ecran noir. Un seul buffer de ~1/20 d'ecran
+     * suffit pour ce petit LCD ; LVGL fera simplement plus de flushs.
      */
-    size_t buf_size = (size_t)ctx->screen_w * (ctx->screen_h / 10)
-                      * sizeof(lv_color16_t);
+    uint16_t buf_rows = ctx->screen_h / 20;
+    if (buf_rows < 4) {
+        buf_rows = 4;
+    }
+    size_t buf_size = (size_t)ctx->screen_w * buf_rows * sizeof(lv_color16_t);
 
     uint8_t *buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    uint8_t *buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
 
-    if (!buf1 || !buf2) {
-        ESP_LOGE(TAG, "Echec alloc draw buffers (%u octets x2)", buf_size);
+    if (!buf1) {
+        ESP_LOGE(TAG, "Echec alloc draw buffer (%u octets)", buf_size);
         vTaskDelete(NULL);
         return;
     }
 
-    lv_display_set_buffers(disp, buf1, buf2, buf_size,
+    lv_display_set_buffers(disp, buf1, NULL, buf_size,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_user_data(disp, ctx);
     lv_display_set_flush_cb(disp, lvgl_flush_cb);
 
-    ESP_LOGI(TAG, "Display LVGL cree (buf=%u octets x2)", buf_size);
+    ESP_LOGI(TAG, "Display LVGL cree (buf=%u octets, %u lignes)",
+             buf_size, buf_rows);
 
     /* 5. Initialiser le display hardware */
     hal_err_t herr = ctx->display->init(ctx->display->ctx);

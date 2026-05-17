@@ -59,7 +59,7 @@ static const char *TAG = "hal_lora_c1262";
 #define C1262_TCXO_TIMEOUT   320
 
 /** Stack et priorite de la tache RX. */
-#define C1262_RX_TASK_STACK  4096
+#define C1262_RX_TASK_STACK  8192
 #define C1262_RX_TASK_PRIO   5
 
 /** Timeout d'attente de TX_DONE (ms). */

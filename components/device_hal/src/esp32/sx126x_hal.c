@@ -27,6 +27,13 @@ static const char *TAG = "sx126x_hal";
 /** Timeout d'attente du pin BUSY (ms). */
 #define BUSY_TIMEOUT_MS 100
 
+/*
+ * Avec SPI_DMA_DISABLED, ESP-IDF limite les transactions polling sans DMA
+ * a la taille du FIFO interne du host. Garder NSS bas et decouper la
+ * phase data conserve une seule transaction logique cote SX1262.
+ */
+#define SPI_POLLING_CHUNK_MAX 64
+
 /**
  * Attend que le SX1262 libere BUSY (niveau bas = pret).
  *
@@ -60,6 +67,55 @@ static sx126x_hal_status_t wait_on_busy(const core1262_hw_t *hw)
     return SX126X_HAL_STATUS_ERROR;
 }
 
+static esp_err_t spi_write_chunks(spi_device_handle_t spi,
+                                  const uint8_t *data,
+                                  uint16_t len)
+{
+    uint16_t off = 0;
+    while (off < len) {
+        uint16_t chunk = len - off;
+        if (chunk > SPI_POLLING_CHUNK_MAX) {
+            chunk = SPI_POLLING_CHUNK_MAX;
+        }
+
+        spi_transaction_t t = {
+            .length    = (size_t)chunk * 8,
+            .tx_buffer = data + off,
+        };
+        esp_err_t err = spi_device_polling_transmit(spi, &t);
+        if (err != ESP_OK) {
+            return err;
+        }
+        off += chunk;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t spi_read_chunks(spi_device_handle_t spi,
+                                 uint8_t *data,
+                                 uint16_t len)
+{
+    uint16_t off = 0;
+    while (off < len) {
+        uint16_t chunk = len - off;
+        if (chunk > SPI_POLLING_CHUNK_MAX) {
+            chunk = SPI_POLLING_CHUNK_MAX;
+        }
+
+        spi_transaction_t t = {
+            .length    = (size_t)chunk * 8,
+            .rxlength  = (size_t)chunk * 8,
+            .rx_buffer = data + off,
+        };
+        esp_err_t err = spi_device_polling_transmit(spi, &t);
+        if (err != ESP_OK) {
+            return err;
+        }
+        off += chunk;
+    }
+    return ESP_OK;
+}
+
 sx126x_hal_status_t sx126x_hal_write(const void *context,
                                      const uint8_t *command,
                                      const uint16_t command_length,
@@ -86,11 +142,7 @@ sx126x_hal_status_t sx126x_hal_write(const void *context,
 
     /* 2. Envoi des donnees (si presentes). */
     if (err == ESP_OK && data_length > 0) {
-        spi_transaction_t t_data = {
-            .length    = (size_t)data_length * 8,
-            .tx_buffer = data,
-        };
-        err = spi_device_polling_transmit(hw->spi, &t_data);
+        err = spi_write_chunks(hw->spi, data, data_length);
     }
 
     gpio_set_level(hw->pin_nss, 1);
@@ -123,13 +175,7 @@ sx126x_hal_status_t sx126x_hal_read(const void *context,
 
     /* 2. Lecture des donnees : on cadence des octets factices et on capture MISO. */
     if (err == ESP_OK && data_length > 0) {
-        spi_transaction_t t_data = {
-            .length    = (size_t)data_length * 8,
-            .rxlength  = (size_t)data_length * 8,
-            .tx_buffer = NULL,           /* octets sortants = 0 (NOP) */
-            .rx_buffer = data,
-        };
-        err = spi_device_polling_transmit(hw->spi, &t_data);
+        err = spi_read_chunks(hw->spi, data, data_length);
     }
 
     gpio_set_level(hw->pin_nss, 1);

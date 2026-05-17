@@ -83,6 +83,20 @@ static portMUX_TYPE s_frag_mux = portMUX_INITIALIZER_UNLOCKED;
  */
 static uint8_t s_frag_result_buf[LORA_FRAG_MAX_FRAGMENTS * LORA_FRAG_PAYLOAD_MAX];
 
+/*
+ * Buffer d'emission fragmente.
+ *
+ * Ne pas le garder sur la pile de lora_sync_task : un message fragmente
+ * consomme LORA_FRAG_MAX_FRAGMENTS * LORA_FRAG_PACKET_MAX (~4 Ko), auquel
+ * s'ajoutent la liste de transactions, la serialisation CBOR et la crypto.
+ * Sur ESP-IDF les tailles de stack xTaskCreate sont en octets ; une pile
+ * LoRa trop courte se traduit par un reboot periodique au premier cycle de
+ * gossip. La tache LoRa est l'unique emettrice de sync, donc un buffer
+ * statique suffit.
+ */
+static uint8_t s_tx_packets[LORA_FRAG_MAX_FRAGMENTS][LORA_FRAG_PACKET_MAX];
+static size_t  s_tx_packet_lens[LORA_FRAG_MAX_FRAGMENTS];
+
 /**
  * Référence statique vers la config pour le callback RX.
  * Nécessaire car le callback hal_lora ne peut pas porter la config
@@ -587,12 +601,11 @@ static void lora_sync_send_one_tx(const lora_sync_config_t *config,
                                   const transaction_t *tx,
                                   uint32_t index, uint32_t total)
 {
-    uint8_t packets[LORA_FRAG_MAX_FRAGMENTS][LORA_FRAG_PACKET_MAX];
-    size_t  packet_lens[LORA_FRAG_MAX_FRAGMENTS];
     uint8_t packet_count = 0;
 
     if (lora_tx_packetize(tx, s_lora_tx_seq_id,
-                          packets, packet_lens, &packet_count) != 0) {
+                          s_tx_packets, s_tx_packet_lens,
+                          &packet_count) != 0) {
         ESP_LOGW(TAG, "TX %lu/%lu non émise : packetize a échoué "
                       "(sérialisation ou > %d fragments)",
                  (unsigned long)(index + 1), (unsigned long)total,
@@ -626,7 +639,8 @@ static void lora_sync_send_one_tx(const lora_sync_config_t *config,
      * TX suivante puisque le seq_id a déjà été consommé.
      */
     for (uint8_t p = 0; p < packet_count; p++) {
-        hal_err_t err = config->lora->send(packets[p], packet_lens[p],
+        hal_err_t err = config->lora->send(s_tx_packets[p],
+                                            s_tx_packet_lens[p],
                                             config->lora->ctx);
         if (err != HAL_OK) {
             ESP_LOGW(TAG, "Échec envoi LoRa TX %lu/%lu (paquet %u/%u)",

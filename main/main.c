@@ -203,6 +203,137 @@ static void power_apply_pm_config(power_state_t state)
 static void power_lock(void)   { xSemaphoreTake(s_power_mutex, portMAX_DELAY); }
 static void power_unlock(void) { xSemaphoreGive(s_power_mutex); }
 
+static bool dag_integrity_parent_exists_unlocked(const hash_t *id)
+{
+    for (uint32_t i = 0; i < s_dag.count; i++) {
+        if (hash_equal(&s_dag.transactions[i].id, id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void dag_integrity_log(const char *context)
+{
+    uint32_t errors = 0;
+    uint32_t locked = 0;
+    uint32_t confirmed = 0;
+    uint32_t cancelled = 0;
+    uint32_t missing_pre_checkpoint = 0;
+    const uint64_t checkpoint_ts = s_checkpoint.timestamp;
+
+    master_keys_t masters = {
+        .keys = s_currency.mint_authorities,
+        .count = s_currency.mint_authority_count,
+    };
+
+    if (s_dag.count > DAG_MAX_TRANSACTIONS) {
+        ESP_LOGE(TAG, "DAG integrity[%s]: count invalide %"PRIu32"/%u",
+                 context, s_dag.count, DAG_MAX_TRANSACTIONS);
+        errors++;
+    }
+
+    for (uint32_t i = 0; i < s_dag.count; i++) {
+        const transaction_t *tx = &s_dag.transactions[i];
+
+        switch (tx->status) {
+            case TX_STATUS_LOCKED:    locked++; break;
+            case TX_STATUS_CONFIRMED: confirmed++; break;
+            case TX_STATUS_CANCELLED: cancelled++; break;
+            default:
+                ESP_LOGE(TAG, "DAG integrity[%s]: tx[%"PRIu32"] statut invalide=%d",
+                         context, i, (int)tx->status);
+                errors++;
+                break;
+        }
+
+        if (tx_validate_structure(tx) != ESP_OK) {
+            ESP_LOGE(TAG, "DAG integrity[%s]: tx[%"PRIu32"] structure invalide",
+                     context, i);
+            errors++;
+        }
+        if (tx_validate_signature(tx) != ESP_OK) {
+            ESP_LOGE(TAG, "DAG integrity[%s]: tx[%"PRIu32"] hash/signature invalide",
+                     context, i);
+            errors++;
+        }
+        if (tx_validate_master(tx, &masters) != ESP_OK) {
+            ESP_LOGE(TAG, "DAG integrity[%s]: tx[%"PRIu32"] autorite MINT invalide",
+                     context, i);
+            errors++;
+        }
+
+        for (uint32_t j = i + 1; j < s_dag.count; j++) {
+            const transaction_t *other = &s_dag.transactions[j];
+            if (hash_equal(&tx->id, &other->id)) {
+                ESP_LOGE(TAG, "DAG integrity[%s]: doublon id tx[%"PRIu32"] tx[%"PRIu32"]",
+                         context, i, j);
+                errors++;
+            }
+            if (public_key_equal(&tx->from, &other->from) &&
+                tx->seq == other->seq &&
+                !hash_equal(&tx->id, &other->id)) {
+                ESP_LOGE(TAG, "DAG integrity[%s]: conflit seq tx[%"PRIu32"] tx[%"PRIu32"] seq=%"PRIu32,
+                         context, i, j, tx->seq);
+                errors++;
+            }
+        }
+
+        if (tx->parent_count == 2 &&
+            hash_equal(&tx->parents[0], &tx->parents[1])) {
+            ESP_LOGE(TAG, "DAG integrity[%s]: tx[%"PRIu32"] parents dupliques",
+                     context, i);
+            errors++;
+        }
+
+        for (uint8_t p = 0; p < tx->parent_count && p < TX_MAX_PARENTS; p++) {
+            const hash_t *parent = &tx->parents[p];
+            if (hash_is_zero(parent)) {
+                if (tx->type != TX_TYPE_MINT) {
+                    ESP_LOGE(TAG, "DAG integrity[%s]: tx[%"PRIu32"] parent zero hors MINT",
+                             context, i);
+                    errors++;
+                }
+                continue;
+            }
+            if (hash_equal(&tx->id, parent)) {
+                ESP_LOGE(TAG, "DAG integrity[%s]: tx[%"PRIu32"] self-parent",
+                         context, i);
+                errors++;
+            }
+            if (!dag_integrity_parent_exists_unlocked(parent)) {
+                if (checkpoint_ts > 0 && tx->timestamp <= checkpoint_ts) {
+                    missing_pre_checkpoint++;
+                } else {
+                    ESP_LOGE(TAG, "DAG integrity[%s]: tx[%"PRIu32"] parent absent",
+                             context, i);
+                    errors++;
+                }
+            }
+        }
+    }
+
+    const transaction_t *tips[DAG_MAX_TIPS];
+    uint32_t tip_count = 0;
+    uint32_t total_tips = 0;
+    if (dag_get_tips_ext(&s_dag, tips, DAG_MAX_TIPS, &tip_count, &total_tips) != ESP_OK) {
+        ESP_LOGE(TAG, "DAG integrity[%s]: calcul tips echoue", context);
+        errors++;
+    }
+
+    ESP_LOGI(TAG, "DAG integrity[%s]: %s count=%"PRIu32" tips=%"PRIu32
+                  " locked=%"PRIu32" confirmed=%"PRIu32" cancelled=%"PRIu32
+                  " pre_checkpoint_parents=%"PRIu32,
+             context,
+             errors == 0 ? "OK" : "FAIL",
+             s_dag.count,
+             total_tips,
+             locked,
+             confirmed,
+             cancelled,
+             missing_pre_checkpoint);
+}
+
 /* ================================================================
  * Point d'entree
  * ================================================================ */
@@ -373,6 +504,7 @@ void app_main(void)
     } else {
         ESP_LOGI(TAG, "[10/12] Pas de MINT initial");
     }
+    dag_integrity_log("post_init");
 
     /* ---- 11. HAL display + comm ---- */
     /*
@@ -444,8 +576,12 @@ void app_main(void)
     espnow_cfg.keypair = &s_keypair;
     strncpy(espnow_cfg.own_alias, s_device_alias, sizeof(espnow_cfg.own_alias) - 1);
 
-    xTaskCreate(espnow_task, "espnow", ESPNOW_TASK_STACK, &espnow_cfg,
-                ESPNOW_TASK_PRIO, NULL);
+    BaseType_t task_ok = xTaskCreate(espnow_task, "espnow", ESPNOW_TASK_STACK,
+                                     &espnow_cfg, ESPNOW_TASK_PRIO, NULL);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Erreur creation tache espnow");
+        return;
+    }
 
     /* lora_sync_task est creee dans transport_lora_init_and_start (deja appele). */
 
@@ -475,8 +611,12 @@ void app_main(void)
              power_get_source_adapter() == POWER_SOURCE_USB ? "USB" : "batterie");
 
     /* Tache core — commune aux deux targets */
-    xTaskCreate(core_task, "core", CORE_TASK_STACK, NULL,
-                CORE_TASK_PRIO, NULL);
+    task_ok = xTaskCreate(core_task, "core", CORE_TASK_STACK, NULL,
+                          CORE_TASK_PRIO, NULL);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Erreur creation tache core");
+        return;
+    }
 
     /*
      * Console de debug serie. debug_console_dumps.c (impl reelle) ou
@@ -529,13 +669,20 @@ void app_main(void)
         }
     }
 
-    xTaskCreate(ui_task, "ui", UI_TASK_STACK, &s_ui_ctx,
-                UI_TASK_PRIO, NULL);
+    task_ok = xTaskCreate(ui_task, "ui", UI_TASK_STACK, &s_ui_ctx,
+                          UI_TASK_PRIO, NULL);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Erreur creation tache ui");
+        return;
+    }
 
     /* [Lot C item 8] Tache de monitoring des stacks. Priorite basse (1)
      * pour ne pas interferer avec les taches critiques. */
-    xTaskCreate(stack_monitor_task, "stkmon", STACK_MONITOR_TASK_STACK,
-                NULL, 1, NULL);
+    task_ok = xTaskCreate(stack_monitor_task, "stkmon", STACK_MONITOR_TASK_STACK,
+                          NULL, 1, NULL);
+    if (task_ok != pdPASS) {
+        ESP_LOGW(TAG, "Erreur creation tache stkmon");
+    }
 
     ESP_LOGI(TAG, "[13/13] Taches lancees — systeme operationnel");
 

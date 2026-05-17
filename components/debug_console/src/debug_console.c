@@ -53,7 +53,7 @@
  * ESP32 CYD). On installe le driver correspondant et on route stdin
  * dessus pour que `fgets(..., stdin)` devienne reellement bloquant
  * et compatible ligne par ligne. */
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG || CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED
 #  include "driver/usb_serial_jtag.h"
 #  include "driver/usb_serial_jtag_vfs.h"
 #elif CONFIG_ESP_CONSOLE_UART
@@ -347,7 +347,7 @@ static void execute(debug_cmd_t cmd)
  */
 static esp_err_t console_io_init(void)
 {
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG || CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED
     /* ESP32-S3 Waveshare : console native via USB. */
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     esp_err_t err = usb_serial_jtag_driver_install(&cfg);
