@@ -18,6 +18,7 @@
 #include "persistence/ledger_store.h"
 #include "persistence/nvs_next_seq.h"
 #include "time_glue.h"
+#include "tx_lifecycle/tx_lifecycle.h"
 #include "wallet/wallet_checkpoint.h"
 
 static const char *TAG = "dag_glue";
@@ -153,8 +154,9 @@ void auto_checkpoint_if_needed(void)
                 if (failed_tx_id.bytes[i] != 0) { zero_id = false; break; }
             }
             if (!zero_id) {
-                esp_err_t cret = dag_set_status(&s_dag, &failed_tx_id,
-                                                TX_STATUS_CANCELLED);
+                esp_err_t cret = tx_lifecycle_cancel(
+                    &s_dag, NULL, &failed_tx_id,
+                    TX_LIFECYCLE_CANCEL_CHECKPOINT_GUARD);
                 if (cret == ESP_OK) {
                     ESP_LOGW(TAG, "TX fautive marquee CANCELLED pour "
                                   "debloquer le checkpoint (cf. F-WL-004)");

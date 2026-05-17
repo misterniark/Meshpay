@@ -17,6 +17,7 @@
 #include "dag/dag.h"
 #include "persistence/nvs_checkpoint.h"
 #include "transaction/tx_validate.h"
+#include "tx_lifecycle/tx_lifecycle.h"
 
 static const char *TAG = "ledger_store";
 
@@ -28,13 +29,17 @@ static const char *TAG = "ledger_store";
 #define LEDGER_FORMAT_VERSION         1U
 
 #define LEDGER_CHECKPOINT_OFFSET      0x00000U
-#define LEDGER_CHECKPOINT_REGION_SIZE 0x04000U
-#define LEDGER_TX_WINDOW_OFFSET       0x04000U
-#define LEDGER_TX_WINDOW_REGION_SIZE  0x10000U
+#define LEDGER_CHECKPOINT_REGION_SIZE 0x08000U
+#define LEDGER_TX_WINDOW_OFFSET       0x08000U
+#define LEDGER_TX_WINDOW_REGION_SIZE  0x20000U
 #define LEDGER_TX_WINDOW_MAX          128U
-#define LEDGER_ATTEST_WINDOW_OFFSET      0x14000U
-#define LEDGER_ATTEST_WINDOW_REGION_SIZE 0x08000U
+#define LEDGER_ATTEST_WINDOW_OFFSET      0x28000U
+#define LEDGER_ATTEST_WINDOW_REGION_SIZE 0x10000U
 #define LEDGER_ATTEST_WINDOW_MAX         64U
+
+/* Layout Phase A legacy, single-slot. Used only for one-shot migration. */
+#define LEDGER_LEGACY_TX_WINDOW_OFFSET      0x04000U
+#define LEDGER_LEGACY_ATTEST_WINDOW_OFFSET  0x14000U
 
 typedef struct {
     uint32_t magic;
@@ -212,6 +217,35 @@ static esp_err_t read_best_blob(uint32_t offset, uint32_t region_size,
     return ESP_OK;
 }
 
+static esp_err_t read_legacy_blob(uint32_t offset,
+                                  uint32_t magic,
+                                  uint32_t expected_payload_len,
+                                  void *dst,
+                                  size_t blob_len,
+                                  ledger_blob_header_t *out_header)
+{
+    if (dst == NULL || blob_len < sizeof(ledger_blob_header_t)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t ret = read_region(offset, dst, blob_len);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    const ledger_blob_header_t *h = (const ledger_blob_header_t *)dst;
+    const uint8_t *payload = (const uint8_t *)dst + sizeof(ledger_blob_header_t);
+    if (!header_valid(h, magic, expected_payload_len) ||
+        h->checksum != fnv1a32(payload, expected_payload_len)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (out_header != NULL) {
+        *out_header = *h;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t write_blob_next(uint32_t offset, uint32_t region_size,
                                  const void *src, size_t blob_len,
                                  uint32_t generation)
@@ -245,19 +279,19 @@ esp_err_t ledger_checkpoint_load(checkpoint_t *checkpoint, void *ctx)
     }
     memset(blob, 0, sizeof(*blob));
 
-    esp_err_t ret = read_region(LEDGER_CHECKPOINT_OFFSET,
-                                blob,
-                                sizeof(*blob));
-    if (ret == ESP_OK &&
-        header_valid(&blob->header, LEDGER_MAGIC_CHECKPOINT,
-                     sizeof(checkpoint_t)) &&
-        blob->header.checksum ==
-            fnv1a32((const uint8_t *)&blob->checkpoint,
-                    sizeof(checkpoint_t))) {
+    ledger_blob_header_t header;
+    esp_err_t ret = read_best_blob(LEDGER_CHECKPOINT_OFFSET,
+                                   LEDGER_CHECKPOINT_REGION_SIZE,
+                                   LEDGER_MAGIC_CHECKPOINT,
+                                   sizeof(checkpoint_t),
+                                   blob,
+                                   sizeof(*blob),
+                                   &header);
+    if (ret == ESP_OK) {
         memcpy(checkpoint, &blob->checkpoint, sizeof(*checkpoint));
-        s_checkpoint_generation = blob->header.generation;
+        s_checkpoint_generation = header.generation;
         ESP_LOGI(TAG, "Checkpoint storage charge (%"PRIu32" comptes, gen=%"PRIu32")",
-                 checkpoint->account_count, blob->header.generation);
+                 checkpoint->account_count, header.generation);
         free(blob);
         return ESP_OK;
     }
@@ -305,10 +339,11 @@ esp_err_t ledger_checkpoint_save(const checkpoint_t *checkpoint, void *ctx)
         fnv1a32((const uint8_t *)&blob->checkpoint,
                 sizeof(checkpoint_t));
 
-    esp_err_t ret = write_region(LEDGER_CHECKPOINT_OFFSET,
-                                 LEDGER_CHECKPOINT_REGION_SIZE,
-                                 blob,
-                                 sizeof(*blob));
+    esp_err_t ret = write_blob_next(LEDGER_CHECKPOINT_OFFSET,
+                                    LEDGER_CHECKPOINT_REGION_SIZE,
+                                    blob,
+                                    sizeof(*blob),
+                                    next_generation);
     if (ret == ESP_OK) {
         s_checkpoint_generation = next_generation;
         ESP_LOGI(TAG, "Checkpoint storage sauvegarde (%"PRIu32" comptes, gen=%"PRIu32")",
@@ -327,21 +362,31 @@ esp_err_t ledger_tx_window_load_into_dag(void)
     }
     memset(blob, 0, sizeof(*blob));
 
-    esp_err_t ret = read_region(LEDGER_TX_WINDOW_OFFSET,
-                                blob,
-                                sizeof(*blob));
-    if (ret != ESP_OK ||
-        !header_valid(&blob->header, LEDGER_MAGIC_TX_WINDOW,
-                      sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX) ||
-        blob->header.record_count > LEDGER_TX_WINDOW_MAX ||
-        blob->header.checksum !=
-            fnv1a32((const uint8_t *)blob->txs,
-                    sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX)) {
+    ledger_blob_header_t header;
+    esp_err_t ret = read_best_blob(LEDGER_TX_WINDOW_OFFSET,
+                                   LEDGER_TX_WINDOW_REGION_SIZE,
+                                   LEDGER_MAGIC_TX_WINDOW,
+                                   sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX,
+                                   blob,
+                                   sizeof(*blob),
+                                   &header);
+    if (ret != ESP_OK) {
+        ret = read_legacy_blob(LEDGER_LEGACY_TX_WINDOW_OFFSET,
+                               LEDGER_MAGIC_TX_WINDOW,
+                               sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX,
+                               blob,
+                               sizeof(*blob),
+                               &header);
+        if (ret == ESP_OK) {
+            ESP_LOGW(TAG, "Fenetre TX storage migree depuis layout legacy");
+        }
+    }
+    if (ret != ESP_OK || header.record_count > LEDGER_TX_WINDOW_MAX) {
         ESP_LOGI(TAG, "Fenetre TX storage absente");
         free(blob);
         return ESP_ERR_NOT_FOUND;
     }
-    s_tx_window_generation = blob->header.generation;
+    s_tx_window_generation = header.generation;
 
     uint32_t loaded = 0;
     uint32_t skipped = 0;
@@ -399,22 +444,29 @@ esp_err_t ledger_tx_window_read_recent(transaction_t *out_txs,
     }
     memset(blob, 0, sizeof(*blob));
 
-    esp_err_t ret = read_region(LEDGER_TX_WINDOW_OFFSET,
-                                blob,
-                                sizeof(*blob));
-    if (ret != ESP_OK ||
-        !header_valid(&blob->header, LEDGER_MAGIC_TX_WINDOW,
-                      sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX) ||
-        blob->header.record_count > LEDGER_TX_WINDOW_MAX ||
-        blob->header.checksum !=
-            fnv1a32((const uint8_t *)blob->txs,
-                    sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX)) {
+    ledger_blob_header_t header;
+    esp_err_t ret = read_best_blob(LEDGER_TX_WINDOW_OFFSET,
+                                   LEDGER_TX_WINDOW_REGION_SIZE,
+                                   LEDGER_MAGIC_TX_WINDOW,
+                                   sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX,
+                                   blob,
+                                   sizeof(*blob),
+                                   &header);
+    if (ret != ESP_OK) {
+        ret = read_legacy_blob(LEDGER_LEGACY_TX_WINDOW_OFFSET,
+                               LEDGER_MAGIC_TX_WINDOW,
+                               sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX,
+                               blob,
+                               sizeof(*blob),
+                               &header);
+    }
+    if (ret != ESP_OK || header.record_count > LEDGER_TX_WINDOW_MAX) {
         free(blob);
         return ESP_ERR_NOT_FOUND;
     }
 
     uint32_t written = 0;
-    for (uint32_t i = 0; i < blob->header.record_count && written < max_count; i++) {
+    for (uint32_t i = 0; i < header.record_count && written < max_count; i++) {
         const transaction_t *tx = &blob->txs[i];
         if (tx_validate_structure(tx) != ESP_OK ||
             tx_validate_signature(tx) != ESP_OK) {
@@ -436,20 +488,31 @@ static esp_err_t ledger_attestation_window_read_blob(ledger_attestation_window_b
     }
 
     memset(blob, 0, sizeof(*blob));
-    esp_err_t ret = read_region(LEDGER_ATTEST_WINDOW_OFFSET,
-                                blob,
-                                sizeof(*blob));
-    if (ret != ESP_OK ||
-        !header_valid(&blob->header, LEDGER_MAGIC_ATTEST_WINDOW,
-                      sizeof(comm_msg_attestation_t) * LEDGER_ATTEST_WINDOW_MAX) ||
-        blob->header.record_count > LEDGER_ATTEST_WINDOW_MAX ||
-        blob->header.checksum !=
-            fnv1a32((const uint8_t *)blob->attestations,
-                    sizeof(comm_msg_attestation_t) * LEDGER_ATTEST_WINDOW_MAX)) {
+    ledger_blob_header_t header;
+    esp_err_t ret = read_best_blob(LEDGER_ATTEST_WINDOW_OFFSET,
+                                   LEDGER_ATTEST_WINDOW_REGION_SIZE,
+                                   LEDGER_MAGIC_ATTEST_WINDOW,
+                                   sizeof(comm_msg_attestation_t) * LEDGER_ATTEST_WINDOW_MAX,
+                                   blob,
+                                   sizeof(*blob),
+                                   &header);
+    if (ret != ESP_OK) {
+        ret = read_legacy_blob(LEDGER_LEGACY_ATTEST_WINDOW_OFFSET,
+                               LEDGER_MAGIC_ATTEST_WINDOW,
+                               sizeof(comm_msg_attestation_t) * LEDGER_ATTEST_WINDOW_MAX,
+                               blob,
+                               sizeof(*blob),
+                               &header);
+        if (ret == ESP_OK) {
+            ESP_LOGW(TAG, "Fenetre attest storage migree depuis layout legacy");
+        }
+    }
+    if (ret != ESP_OK || header.record_count > LEDGER_ATTEST_WINDOW_MAX) {
         return ESP_ERR_NOT_FOUND;
     }
 
-    s_attestation_window_generation = blob->header.generation;
+    blob->header = header;
+    s_attestation_window_generation = header.generation;
     return ESP_OK;
 }
 
@@ -514,10 +577,11 @@ static esp_err_t ledger_attestation_window_write_blob(
         fnv1a32((const uint8_t *)blob->attestations,
                 sizeof(comm_msg_attestation_t) * LEDGER_ATTEST_WINDOW_MAX);
 
-    esp_err_t ret = write_region(LEDGER_ATTEST_WINDOW_OFFSET,
-                                 LEDGER_ATTEST_WINDOW_REGION_SIZE,
-                                 blob,
-                                 sizeof(*blob));
+    esp_err_t ret = write_blob_next(LEDGER_ATTEST_WINDOW_OFFSET,
+                                    LEDGER_ATTEST_WINDOW_REGION_SIZE,
+                                    blob,
+                                    sizeof(*blob),
+                                    next_generation);
     if (ret == ESP_OK) {
         s_attestation_window_generation = next_generation;
         ESP_LOGI(TAG, "Fenetre attest storage sauvegardee (%"PRIu32" attest)",
@@ -632,12 +696,13 @@ esp_err_t ledger_attestation_apply_to_dag(uint32_t *out_applied)
         const transaction_t *tx = dag_get_by_id(&s_dag, &att->tx_id);
         if (tx == NULL ||
             tx->status == TX_STATUS_CONFIRMED ||
-            tx->status == TX_STATUS_CANCELLED ||
-            !public_key_equal(&att->attester_key, &tx->to)) {
+            tx->status == TX_STATUS_CANCELLED) {
             continue;
         }
 
-        if (dag_set_status(&s_dag, &att->tx_id, TX_STATUS_CONFIRMED) == ESP_OK) {
+        if (tx_lifecycle_confirm_by_attestation(
+                &s_dag, att,
+                TX_LIFECYCLE_CONFIRM_REPLAYED_ATTESTATION) == ESP_OK) {
             applied++;
         }
     }
@@ -668,17 +733,32 @@ esp_err_t ledger_tx_window_save_from_dag(const char *reason)
     ledger_tx_window_blob_t *existing =
         (ledger_tx_window_blob_t *)ledger_alloc(sizeof(*existing));
     if (existing != NULL) {
-        if (read_region(LEDGER_TX_WINDOW_OFFSET, existing,
-                        sizeof(*existing)) == ESP_OK &&
-            header_valid(&existing->header, LEDGER_MAGIC_TX_WINDOW,
-                         sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX) &&
-            existing->header.record_count <= LEDGER_TX_WINDOW_MAX &&
-            existing->header.checksum ==
-                fnv1a32((const uint8_t *)existing->txs,
-                        sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX)) {
-            s_tx_window_generation = existing->header.generation;
+        ledger_blob_header_t existing_header;
+        if (read_best_blob(LEDGER_TX_WINDOW_OFFSET,
+                           LEDGER_TX_WINDOW_REGION_SIZE,
+                           LEDGER_MAGIC_TX_WINDOW,
+                           sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX,
+                           existing,
+                           sizeof(*existing),
+                           &existing_header) == ESP_OK &&
+            existing_header.record_count <= LEDGER_TX_WINDOW_MAX) {
+            /* Nouveau layout dual-slot. */
+        } else if (read_legacy_blob(LEDGER_LEGACY_TX_WINDOW_OFFSET,
+                                    LEDGER_MAGIC_TX_WINDOW,
+                                    sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX,
+                                    existing,
+                                    sizeof(*existing),
+                                    &existing_header) == ESP_OK &&
+                   existing_header.record_count <= LEDGER_TX_WINDOW_MAX) {
+            ESP_LOGW(TAG, "Fenetre TX storage legacy fusionnee puis migree");
+        } else {
+            existing_header.record_count = 0;
+        }
+        if (existing_header.record_count <= LEDGER_TX_WINDOW_MAX &&
+            existing_header.record_count > 0) {
+            s_tx_window_generation = existing_header.generation;
             next_generation = s_tx_window_generation + 1U;
-            for (uint32_t i = 0; i < existing->header.record_count; i++) {
+            for (uint32_t i = 0; i < existing_header.record_count; i++) {
                 const transaction_t *tx = &existing->txs[i];
                 if (tx_validate_structure(tx) == ESP_OK &&
                     tx_validate_signature(tx) == ESP_OK) {
@@ -716,10 +796,11 @@ esp_err_t ledger_tx_window_save_from_dag(const char *reason)
         fnv1a32((const uint8_t *)blob->txs,
                 sizeof(transaction_t) * LEDGER_TX_WINDOW_MAX);
 
-    esp_err_t ret = write_region(LEDGER_TX_WINDOW_OFFSET,
-                                 LEDGER_TX_WINDOW_REGION_SIZE,
-                                 blob,
-                                 sizeof(*blob));
+    esp_err_t ret = write_blob_next(LEDGER_TX_WINDOW_OFFSET,
+                                    LEDGER_TX_WINDOW_REGION_SIZE,
+                                    blob,
+                                    sizeof(*blob),
+                                    next_generation);
     if (ret == ESP_OK) {
         s_tx_window_generation = next_generation;
         ESP_LOGI(TAG, "Fenetre TX storage sauvegardee (%"PRIu32" TX, %s)",

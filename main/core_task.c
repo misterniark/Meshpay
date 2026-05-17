@@ -19,6 +19,7 @@
 #include "persistence/ledger_store.h"
 #include "time_glue.h"
 #include "transport/transport_lora.h"
+#include "tx_lifecycle/tx_lifecycle.h"
 #include "ui_dispatch.h"
 #include "wallet/wallet_lock.h"
 #include "power_manager.h"
@@ -36,7 +37,8 @@ static void check_lock_expirations(void)
     uint32_t expired_count = 0;
     lock_table_expire(&s_lock_table, expired_ids, WALLET_MAX_LOCKS, &expired_count);
     for (uint32_t i = 0; i < expired_count; i++) {
-        dag_set_status(&s_dag, &expired_ids[i], TX_STATUS_CANCELLED);
+        (void)tx_lifecycle_cancel(&s_dag, NULL, &expired_ids[i],
+                                  TX_LIFECYCLE_CANCEL_TIMEOUT);
         (void)ledger_tx_window_save_from_dag("lock_expired");
         ESP_LOGW(TAG, "Verrou expire, TX annulee");
     }

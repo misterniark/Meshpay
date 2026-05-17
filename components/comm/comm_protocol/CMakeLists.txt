@@ -7,8 +7,7 @@ set(comm_protocol_srcs
 
 idf_build_get_property(project_name PROJECT_NAME)
 if(project_name STREQUAL "meshpay_test_app")
-    # 8 fichiers de test (broadcast, set_alias, set_beneficiary, ping_pong,
-    # announce, ack, attestation, time_sync) = ~96 TEST_CASE au total.
+    # Tests des messages radio : formats wire, round-trips et signatures.
     list(APPEND comm_protocol_srcs
         "test/test_comm_msg_broadcast.c"
         "test/test_comm_msg_set_alias.c"
@@ -17,6 +16,7 @@ if(project_name STREQUAL "meshpay_test_app")
         "test/test_comm_msg_announce.c"
         "test/test_comm_msg_ack.c"
         "test/test_comm_msg_attestation.c"
+        "test/test_comm_msg_dag_sync.c"
         "test/test_comm_msg_time_sync.c"
     )
     idf_component_register(

@@ -24,6 +24,7 @@
 #include "persistence/nvs_next_seq.h"
 #include "time_glue.h"
 #include "transaction/tx_create.h"
+#include "tx_lifecycle/tx_lifecycle.h"
 #include "wallet/wallet_lock.h"
 
 static const char *TAG = "op_pay";
@@ -107,7 +108,8 @@ esp_err_t initiate_payment(const public_key_t *to, uint32_t amount)
          * propagée aux peers via LoRa sync.
          */
         ESP_LOGE(TAG, "Erreur verrouillage: %d — rollback CANCELLED sur DAG", ret);
-        esp_err_t cret = dag_set_status(&s_dag, &tx.id, TX_STATUS_CANCELLED);
+        esp_err_t cret = tx_lifecycle_cancel(
+            &s_dag, NULL, &tx.id, TX_LIFECYCLE_CANCEL_LOCAL_ROLLBACK);
         if (cret != ESP_OK) {
             ESP_LOGE(TAG, "Rollback CANCELLED echoue (%d) — TX orpheline dans le DAG", cret);
         }

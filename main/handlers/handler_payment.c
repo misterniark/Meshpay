@@ -23,6 +23,7 @@
 #include "persistence/ledger_store.h"
 #include "time_glue.h"
 #include "transport/transport_lora.h"
+#include "tx_lifecycle/tx_lifecycle.h"
 #include "wallet/wallet.h"
 #include "wallet/wallet_lock.h"
 #include "currency/currency_rules.h"
@@ -196,7 +197,12 @@ void handle_tx_received(const comm_event_t *evt)
     if (rx_tx->type == TX_TYPE_TRANSFER &&
         public_key_equal(&rx_tx->to, &s_keypair.public_key)) {
 
-        dag_set_status(&s_dag, &rx_tx->id, TX_STATUS_CONFIRMED);
+        ret = tx_lifecycle_confirm_received_transfer(&s_dag, &rx_tx->id,
+                                                     &s_keypair.public_key);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "TX recue vers nous : confirmation refusee (%d)", ret);
+            return;
+        }
         persist_runtime_checkpoint("rx_to_me_confirmed");
 
         const uint8_t *dest_mac = find_peer_mac(&rx_tx->from);
@@ -275,13 +281,12 @@ void handle_ack_received(const comm_event_t *evt)
         return;
     }
 
-    esp_err_t ret = lock_table_confirm(&s_lock_table, tx_id);
+    esp_err_t ret = tx_lifecycle_confirm_by_ack(&s_dag, &s_lock_table,
+                                                tx_id, sender_key);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "ACK recu pour verrou inconnu");
+        ESP_LOGW(TAG, "ACK recu mais transition refusee (%d)", ret);
         return;
     }
-
-    dag_set_status(&s_dag, tx_id, TX_STATUS_CONFIRMED);
     persist_runtime_checkpoint("ack_confirmed");
     ESP_LOGI(TAG, "TX confirmee (ACK recu et verifie)");
 }
@@ -289,8 +294,12 @@ void handle_ack_received(const comm_event_t *evt)
 void handle_tx_timeout(const comm_event_t *evt)
 {
     const hash_t *tx_id = &evt->data.tx_id;
-    lock_table_cancel(&s_lock_table, tx_id);
-    dag_set_status(&s_dag, tx_id, TX_STATUS_CANCELLED);
+    esp_err_t ret = tx_lifecycle_cancel(&s_dag, &s_lock_table, tx_id,
+                                        TX_LIFECYCLE_CANCEL_TIMEOUT);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Timeout TX : annulation refusee (%d)", ret);
+        return;
+    }
     persist_runtime_checkpoint("tx_timeout");
     ESP_LOGW(TAG, "TX annulee (timeout)");
 }
@@ -315,29 +324,12 @@ void handle_attestation_received(const comm_event_t *evt)
         ESP_LOGW(TAG, "Attestation reçue pour TX annulée — ignorée");
         return;
     }
-    if (!public_key_equal(&att->attester_key, &tx->to)) {
-        ESP_LOGW(TAG, "Attestation rejetée : attester_key != tx.to "
-                 "(tentative d'attestation par un tiers)");
+    esp_err_t ret = tx_lifecycle_confirm_by_attestation(
+        &s_dag, att, TX_LIFECYCLE_CONFIRM_ATTESTATION);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Attestation rejetee par cycle TX (%d)", ret);
         return;
     }
-
-    /*
-     * [F-MN-015] Vérification locale de la signature de l'attestation
-     * en défense en profondeur. La signature est normalement déjà
-     * vérifiée par `lora_sync_task` (via `comm_msg_verify_attestation`)
-     * avant que l'événement soit posté dans la queue, mais on
-     * re-vérifie ici pour fermer tout chemin alternatif (tests,
-     * injection directe). Le payload signé est exactement `tx_id`
-     * (32 octets) — voir `comm_msg.h` pour le format.
-     */
-    esp_err_t verr = crypto_verify(att->tx_id.bytes, CRYPTO_HASH_SIZE,
-                                   &att->attester_key, &att->signature);
-    if (verr != ESP_OK) {
-        ESP_LOGW(TAG, "Attestation rejetee : signature invalide");
-        return;
-    }
-
-    dag_set_status(&s_dag, &att->tx_id, TX_STATUS_CONFIRMED);
     persist_runtime_checkpoint("attestation_confirmed");
     (void)ledger_tx_window_save_from_dag("attestation_confirmed");
     ESP_LOGI(TAG, "TX confirmée par attestation LoRa (amount=%"PRIu32")",

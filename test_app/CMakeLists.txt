@@ -25,6 +25,7 @@ set(EXTRA_COMPONENT_DIRS
     "../components/core/transaction"
     "../components/core/dag"
     "../components/core/wallet"
+    "../components/core/tx_lifecycle"
     "../components/device_hal"
     "../components/comm/comm_protocol"
     "../components/comm/espnow"

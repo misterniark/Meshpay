@@ -11,6 +11,7 @@ idf_component_register(
              transaction
              dag
              wallet
+             tx_lifecycle
              currency
              time_manager
              comm_protocol

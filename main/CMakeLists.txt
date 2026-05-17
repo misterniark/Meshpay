@@ -73,6 +73,7 @@ idf_component_register(
     SRCS ${meshpay_main_srcs}
     INCLUDE_DIRS "."
     REQUIRES wallet dag transaction crypto
+             tx_lifecycle
              comm_protocol espnow lora_sync
              currency time_manager device_hal
              nvs_flash esp_timer esp_wifi esp_pm
