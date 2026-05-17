@@ -4,7 +4,7 @@
  *
  * Fournit les fonctions pour générer, exporter et importer des paires
  * de clés Ed25519. Depuis le Lot E.2, l'implémentation utilise Monocypher
- * (vendoré) pour la dérivation Ed25519 (RFC 8032, SHA-512), et
+ * (vendoré) pour l'API `crypto_ed25519_*`, et
  * `esp_fill_random()` (TRNG matériel ESP32) pour la source d'entropie.
  */
 

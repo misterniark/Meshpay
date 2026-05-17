@@ -179,3 +179,13 @@ int ui_manager_nav_depth(void)
     /* s_nav_top == -1 (pile vide) => profondeur 0. */
     return s_nav_top + 1;
 }
+
+bool ui_manager_set_handler_for_test(ui_screen_id_t screen_id,
+                                     ui_screen_handler_t *handler)
+{
+    if (screen_id >= UI_SCREEN_COUNT) {
+        return false;
+    }
+    s_handlers[screen_id] = handler;
+    return true;
+}

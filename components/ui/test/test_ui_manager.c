@@ -5,16 +5,10 @@
  * Couvre les bugs B1 (saturation de la pile de navigation) et B2
  * (handler manquant lors d'un back()) identifiés dans l'audit Lot A.
  *
- * Pour pouvoir tester sans dépendre de LVGL ni des écrans réels,
- * ce fichier fournit :
- *   - 13 handlers fictifs (un par ui_screen_id_t) qui remplacent au
- *     link les symboles attendus par ui_manager.c. Les create()
- *     retournent NULL pour court-circuiter l'appel à lv_screen_load().
- *   - Un stub de lv_screen_load() : ne sera jamais appelé en pratique
- *     (create() retourne NULL), mais il faut le symbole pour le link.
- *
- * En conséquence, ce test doit être bâti en isolation, sans linker
- * les vrais src/ui_screen_*.c ni la lib LVGL (duplications sinon).
+ * Le binaire test_app linke les vrais écrans. Pour tester la navigation
+ * sans dépendre de LVGL, on injecte des handlers fictifs via
+ * ui_manager_set_handler_for_test(). Les create() retournent NULL pour
+ * court-circuiter l'appel à lv_screen_load().
  */
 
 #include "unity.h"
@@ -26,18 +20,10 @@
 /*                         Stubs : LVGL + handlers d'écran                    */
 /* ========================================================================= */
 
-/**
- * Stub minimal de lv_screen_load() : non appelé tant que create()
- * retourne NULL, mais le symbole doit exister pour le linker.
- */
-void lv_screen_load(lv_obj_t *scr)
-{
-    (void)scr;
-}
-
 /** Compteurs pour valider les invariants depuis les tests. */
 static int s_create_count[UI_SCREEN_COUNT];
 static int s_destroy_count[UI_SCREEN_COUNT];
+static ui_screen_handler_t s_stub_handlers[UI_SCREEN_COUNT];
 
 /**
  * Macro de définition d'un handler fictif.
@@ -61,11 +47,6 @@ static int s_destroy_count[UI_SCREEN_COUNT];
     static void stub_destroy_##name(void)                                   \
     {                                                                       \
         s_destroy_count[id]++;                                              \
-    }                                                                       \
-    ui_screen_handler_t ui_screen_##name##_handler = {                       \
-        .create  = stub_create_##name,                                      \
-        .update  = NULL,                                                    \
-        .destroy = stub_destroy_##name                                      \
     }
 
 DEFINE_STUB_HANDLER(setup,     UI_SCREEN_SETUP);
@@ -82,6 +63,37 @@ DEFINE_STUB_HANDLER(scan,      UI_SCREEN_SCAN);
 DEFINE_STUB_HANDLER(rename,    UI_SCREEN_RENAME);
 DEFINE_STUB_HANDLER(forward,   UI_SCREEN_FORWARD);
 
+static void ui_manager_test_reset(void)
+{
+    for (int i = 0; i < UI_SCREEN_COUNT; i++) {
+        s_create_count[i]  = 0;
+        s_destroy_count[i] = 0;
+        s_stub_handlers[i].create = NULL;
+        s_stub_handlers[i].update = NULL;
+        s_stub_handlers[i].destroy = NULL;
+    }
+
+    s_stub_handlers[UI_SCREEN_SETUP]     = (ui_screen_handler_t){stub_create_setup, NULL, stub_destroy_setup};
+    s_stub_handlers[UI_SCREEN_HOME]      = (ui_screen_handler_t){stub_create_home, NULL, stub_destroy_home};
+    s_stub_handlers[UI_SCREEN_PAY]       = (ui_screen_handler_t){stub_create_pay, NULL, stub_destroy_pay};
+    s_stub_handlers[UI_SCREEN_HISTORY]   = (ui_screen_handler_t){stub_create_history, NULL, stub_destroy_history};
+    s_stub_handlers[UI_SCREEN_SETTINGS]  = (ui_screen_handler_t){stub_create_settings, NULL, stub_destroy_settings};
+    s_stub_handlers[UI_SCREEN_RECEIVE]   = (ui_screen_handler_t){stub_create_receive, NULL, stub_destroy_receive};
+    s_stub_handlers[UI_SCREEN_BROADCAST] = (ui_screen_handler_t){stub_create_broadcast, NULL, stub_destroy_broadcast};
+    s_stub_handlers[UI_SCREEN_ADMIN]     = (ui_screen_handler_t){stub_create_admin, NULL, stub_destroy_admin};
+    s_stub_handlers[UI_SCREEN_MINT]      = (ui_screen_handler_t){stub_create_mint, NULL, stub_destroy_mint};
+    s_stub_handlers[UI_SCREEN_MESSAGE]   = (ui_screen_handler_t){stub_create_message, NULL, stub_destroy_message};
+    s_stub_handlers[UI_SCREEN_SCAN]      = (ui_screen_handler_t){stub_create_scan, NULL, stub_destroy_scan};
+    s_stub_handlers[UI_SCREEN_RENAME]    = (ui_screen_handler_t){stub_create_rename, NULL, stub_destroy_rename};
+    s_stub_handlers[UI_SCREEN_FORWARD]   = (ui_screen_handler_t){stub_create_forward, NULL, stub_destroy_forward};
+
+    ui_manager_init(NULL);
+    for (int i = 0; i < UI_SCREEN_COUNT; i++) {
+        TEST_ASSERT_TRUE(ui_manager_set_handler_for_test((ui_screen_id_t)i,
+                                                         &s_stub_handlers[i]));
+    }
+}
+
 /* ========================================================================= */
 /*                         Fixtures                                           */
 /* ========================================================================= */
@@ -93,11 +105,7 @@ DEFINE_STUB_HANDLER(forward,   UI_SCREEN_FORWARD);
  */
 __attribute__((weak)) void setUp(void)
 {
-    for (int i = 0; i < UI_SCREEN_COUNT; i++) {
-        s_create_count[i]  = 0;
-        s_destroy_count[i] = 0;
-    }
-    ui_manager_init(NULL); /* ctx NULL : les stubs ne le déréférencent pas */
+    ui_manager_test_reset();
 }
 
 __attribute__((weak)) void tearDown(void)
@@ -113,6 +121,8 @@ __attribute__((weak)) void tearDown(void)
  */
 TEST_CASE("ui_manager_initial_state", "[ui_manager]")
 {
+    ui_manager_test_reset();
+
     TEST_ASSERT_EQUAL(UI_SCREEN_HOME, ui_manager_current());
     TEST_ASSERT_EQUAL_INT(0, ui_manager_nav_depth());
 }
@@ -122,6 +132,8 @@ TEST_CASE("ui_manager_initial_state", "[ui_manager]")
  */
 TEST_CASE("ui_manager_show_pushes_stack", "[ui_manager]")
 {
+    ui_manager_test_reset();
+
     TEST_ASSERT_TRUE(ui_manager_show(UI_SCREEN_PAY));
     TEST_ASSERT_EQUAL(UI_SCREEN_PAY, ui_manager_current());
     TEST_ASSERT_EQUAL_INT(1, ui_manager_nav_depth());
@@ -134,6 +146,8 @@ TEST_CASE("ui_manager_show_pushes_stack", "[ui_manager]")
  */
 TEST_CASE("ui_manager_back_empty_stack_returns_home", "[ui_manager]")
 {
+    ui_manager_test_reset();
+
     TEST_ASSERT_TRUE(ui_manager_back());
     TEST_ASSERT_EQUAL(UI_SCREEN_HOME, ui_manager_current());
     TEST_ASSERT_EQUAL_INT(0, ui_manager_nav_depth());
@@ -144,6 +158,8 @@ TEST_CASE("ui_manager_back_empty_stack_returns_home", "[ui_manager]")
  */
 TEST_CASE("ui_manager_show_then_back", "[ui_manager]")
 {
+    ui_manager_test_reset();
+
     ui_manager_show(UI_SCREEN_PAY);
     TEST_ASSERT_TRUE(ui_manager_back());
     TEST_ASSERT_EQUAL(UI_SCREEN_HOME, ui_manager_current());
@@ -172,6 +188,8 @@ TEST_CASE("ui_manager_show_then_back", "[ui_manager]")
  */
 TEST_CASE("ui_manager_show_refuses_when_stack_full", "[ui_manager]")
 {
+    ui_manager_test_reset();
+
     /* On utilise des écrans alternés pour éviter qu'un meme id apparaisse
        deux fois et fausse les compteurs : ce test cible la pile, pas
        le contenu des entrees. */
@@ -208,12 +226,6 @@ TEST_CASE("ui_manager_show_refuses_when_stack_full", "[ui_manager]")
 /*                         Tests : Bug B2 — handler manquant                  */
 /* ========================================================================= */
 
-/* Pour simuler un handler absent on a besoin de pouvoir le retirer
-   apres init. ui_manager.c n'expose pas d'API pour ca, mais on peut
-   neutraliser un handler fictif (sa create devient NULL) via une
-   astuce : on ecrase directement l'instance handler. Comme nos stubs
-   sont des globals modifiables par le test, on peut les desactiver. */
-
 /**
  * @brief back() avec un handler cible NULL retombe sur HOME (bug B2).
  *
@@ -231,21 +243,23 @@ TEST_CASE("ui_manager_show_refuses_when_stack_full", "[ui_manager]")
 TEST_CASE("ui_manager_back_falls_back_to_home_if_handler_missing",
           "[ui_manager]")
 {
+    ui_manager_test_reset();
+
     ui_manager_show(UI_SCREEN_PAY);
     ui_manager_show(UI_SCREEN_HISTORY);
 
     /* Sauvegarde + neutralisation du handler PAY pour simuler une
        table incoherente (par exemple un enum etendu sans handler). */
-    ui_screen_handler_t saved = ui_screen_pay_handler;
-    ui_screen_pay_handler.create  = NULL;
-    ui_screen_pay_handler.destroy = NULL;
+    ui_screen_handler_t saved = s_stub_handlers[UI_SCREEN_PAY];
+    s_stub_handlers[UI_SCREEN_PAY].create  = NULL;
+    s_stub_handlers[UI_SCREEN_PAY].destroy = NULL;
 
     int home_created_before = s_create_count[UI_SCREEN_HOME];
 
     bool ok = ui_manager_back();
 
     /* Restauration pour ne pas polluer les tests suivants. */
-    ui_screen_pay_handler = saved;
+    s_stub_handlers[UI_SCREEN_PAY] = saved;
 
     TEST_ASSERT_TRUE_MESSAGE(ok, "back() doit reussir via le fallback HOME");
     TEST_ASSERT_EQUAL_MESSAGE(UI_SCREEN_HOME, ui_manager_current(),

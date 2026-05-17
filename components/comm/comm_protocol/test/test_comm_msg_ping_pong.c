@@ -123,8 +123,8 @@ TEST_CASE("ping_pack_null_params", "[comm_msg]")
 {
     uint8_t buf[COMM_MSG_LORA_MAX];
     size_t out_len = 0;
-    public_key_t key;
-    signature_t sig;
+    public_key_t key = {0};
+    signature_t sig = {0};
 
     TEST_ASSERT_EQUAL(-1, comm_msg_pack_ping(NULL, sizeof(buf), &key, &sig, 1, &out_len));
     TEST_ASSERT_EQUAL(-1, comm_msg_pack_ping(buf, sizeof(buf), NULL, &sig, 1, &out_len));

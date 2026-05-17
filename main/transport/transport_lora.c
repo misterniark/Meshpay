@@ -13,10 +13,12 @@
 #include "transport_lora.h"
 
 #include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_random.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -25,6 +27,7 @@
 #include "comm/lora_sync.h"
 #include "hal/hal_lora.h"
 #include "hal/hal_lora_factory.h"
+#include "persistence/ledger_store.h"
 #include "time_glue.h"
 #include "transaction/tx_types.h"
 
@@ -35,7 +38,11 @@ static const char *TAG = "tport_lora";
  * ---------------------------------------------------------------- */
 
 /** Intervalle de sync LoRa (ms). */
+#if CONFIG_MESHPAY_TEST_DEVICE_SEED
+#define LORA_SYNC_INTERVAL_MS  15000
+#else
 #define LORA_SYNC_INTERVAL_MS  120000
+#endif
 
 /* ----------------------------------------------------------------
  * Etat prive : HAL, buffers, config lora_sync_task
@@ -108,6 +115,21 @@ static uint64_t lora_get_lamport(void)
     return time_manager_get_lamport(&s_time_manager);
 }
 
+static bool tx_id_already_collected(const transaction_t *txs,
+                                    uint32_t count,
+                                    const hash_t *id)
+{
+    if (txs == NULL || id == NULL) {
+        return false;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        if (hash_equal(&txs[i].id, id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /**
  * Callback de collecte des TX a diffuser via LoRa.
  *
@@ -143,9 +165,23 @@ static uint32_t lora_collect_confirmed_txs(uint64_t       since_ts,
         return 0;
     }
 
+#if CONFIG_MESHPAY_TEST_DEVICE_SEED
+    transaction_t seed_tx;
+    if (test_device_seed_get_tx(&seed_tx)) {
+        memcpy(&out_buf[written], &seed_tx, sizeof(transaction_t));
+        if (seed_tx.timestamp > newest) newest = seed_tx.timestamp;
+        written++;
+    }
+#endif
+
     for (uint32_t i = 0; i < s_dag.count && written < max_count; i++) {
         const transaction_t *tx = &s_dag.transactions[i];
         if (tx->status == TX_STATUS_CONFIRMED && tx->timestamp > since_ts) {
+#if CONFIG_MESHPAY_TEST_DEVICE_SEED
+            if (memcmp(&tx->id, &seed_tx.id, sizeof(hash_t)) == 0) {
+                continue;
+            }
+#endif
             memcpy(&out_buf[written], tx, sizeof(transaction_t));
             if (tx->timestamp > newest) newest = tx->timestamp;
             written++;
@@ -154,8 +190,95 @@ static uint32_t lora_collect_confirmed_txs(uint64_t       since_ts,
 
     xSemaphoreGive(s_state_mutex);
 
+    /*
+     * Apres reboot, les TX recentes confirmees peuvent etre consolidees
+     * dans le checkpoint et donc absentes de s_dag. On les garde quand
+     * meme dans la fenetre durable pour l'historique UI et pour le gossip
+     * LoRa post-reboot : sans cette passe, un device redemarre ne propage
+     * plus ses confirmations recentes.
+     */
+    if (written < max_count) {
+        transaction_t *recent =
+            (transaction_t *)malloc(sizeof(transaction_t) * max_count);
+        if (recent != NULL) {
+            uint32_t recent_count = 0;
+            if (ledger_tx_window_read_recent(recent, max_count,
+                                             &recent_count) == ESP_OK) {
+                for (uint32_t i = 0; i < recent_count && written < max_count; i++) {
+                    const transaction_t *tx = &recent[i];
+                    if (tx->status != TX_STATUS_CONFIRMED ||
+                        tx->timestamp <= since_ts ||
+                        tx_id_already_collected(out_buf, written, &tx->id)) {
+                        continue;
+                    }
+                    memcpy(&out_buf[written], tx, sizeof(transaction_t));
+                    if (tx->timestamp > newest) newest = tx->timestamp;
+                    written++;
+                }
+            }
+            free(recent);
+        }
+    }
+
     *out_newest_ts = newest;
     return written;
+}
+
+static bool lora_get_dag_summary(lora_dag_summary_t *out_summary, void *ctx)
+{
+    (void)ctx;
+    if (out_summary == NULL) {
+        return false;
+    }
+
+    memset(out_summary, 0, sizeof(*out_summary));
+
+    if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "DAG_SUMMARY : mutex indisponible");
+        return false;
+    }
+
+    out_summary->checkpoint_timestamp = s_checkpoint.timestamp;
+    out_summary->last_tx_timestamp = s_checkpoint.timestamp;
+    out_summary->tx_count_window = (s_dag.count > UINT16_MAX)
+                                       ? UINT16_MAX
+                                       : (uint16_t)s_dag.count;
+
+    for (uint32_t i = 0; i < s_dag.count; i++) {
+        const transaction_t *tx = &s_dag.transactions[i];
+        if (tx->status == TX_STATUS_CONFIRMED &&
+            tx->timestamp > out_summary->last_tx_timestamp) {
+            out_summary->last_tx_timestamp = tx->timestamp;
+        }
+    }
+
+    const transaction_t *tips[COMM_MSG_DAG_SUMMARY_MAX_TIPS];
+    uint32_t tip_count = 0;
+    if (dag_get_tips(&s_dag, tips, COMM_MSG_DAG_SUMMARY_MAX_TIPS,
+                     &tip_count) == ESP_OK) {
+        out_summary->tip_count = (uint8_t)tip_count;
+        for (uint32_t i = 0; i < tip_count; i++) {
+            out_summary->tips[i] = tips[i]->id;
+        }
+    }
+
+    xSemaphoreGive(s_state_mutex);
+    return true;
+}
+
+static uint32_t lora_collect_attestations(comm_msg_attestation_t *out_buf,
+                                          uint32_t max_count,
+                                          void *ctx)
+{
+    (void)ctx;
+    uint32_t count = 0;
+    if (out_buf == NULL || max_count == 0) {
+        return 0;
+    }
+    if (ledger_attestation_window_read_recent(out_buf, max_count, &count) != ESP_OK) {
+        return 0;
+    }
+    return count;
 }
 
 /* ----------------------------------------------------------------
@@ -195,6 +318,8 @@ hal_err_t transport_lora_init_and_start(void)
     s_lora_cfg.lora                   = &s_lora_hal;
     s_lora_cfg.evt_queue              = s_evt_queue;
     s_lora_cfg.collect_confirmed_txs  = lora_collect_confirmed_txs;
+    s_lora_cfg.get_dag_summary        = lora_get_dag_summary;
+    s_lora_cfg.collect_attestations    = lora_collect_attestations;
     s_lora_cfg.collect_ctx            = NULL;
     s_lora_cfg.sync_interval_ms       = LORA_SYNC_INTERVAL_MS;
     s_lora_cfg.is_master              = false;

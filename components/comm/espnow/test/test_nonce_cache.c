@@ -23,9 +23,14 @@
 
 static nonce_cache_t s_cache;
 
-__attribute__((weak)) void setUp(void)
+static void nonce_cache_test_reset(void)
 {
     nonce_cache_init(&s_cache);
+}
+
+__attribute__((weak)) void setUp(void)
+{
+    nonce_cache_test_reset();
 }
 
 __attribute__((weak)) void tearDown(void)
@@ -43,6 +48,8 @@ __attribute__((weak)) void tearDown(void)
  */
 TEST_CASE("nonce_cache_init_vide", "[nonce_cache]")
 {
+    nonce_cache_test_reset();
+
     /* Apres init, aucun nonce n'a ete vu, quelle que soit la valeur */
     TEST_ASSERT_FALSE(nonce_cache_seen(&s_cache, 0));
     TEST_ASSERT_FALSE(nonce_cache_seen(&s_cache, 1));
@@ -61,6 +68,8 @@ TEST_CASE("nonce_cache_init_vide", "[nonce_cache]")
  */
 TEST_CASE("nonce_cache_add_et_seen", "[nonce_cache]")
 {
+    nonce_cache_test_reset();
+
     nonce_cache_add(&s_cache, 42);
 
     TEST_ASSERT_TRUE(nonce_cache_seen(&s_cache, 42));
@@ -77,6 +86,8 @@ TEST_CASE("nonce_cache_add_et_seen", "[nonce_cache]")
  */
 TEST_CASE("nonce_cache_zero_traite_comme_normal", "[nonce_cache]")
 {
+    nonce_cache_test_reset();
+
     /* Apres init : 0 n'a pas ete vu */
     TEST_ASSERT_FALSE(nonce_cache_seen(&s_cache, 0));
 
@@ -96,6 +107,8 @@ TEST_CASE("nonce_cache_zero_traite_comme_normal", "[nonce_cache]")
  */
 TEST_CASE("nonce_cache_multiple", "[nonce_cache]")
 {
+    nonce_cache_test_reset();
+
     const uint32_t nonces[] = {10, 20, 30, 40, 50};
     const int count = sizeof(nonces) / sizeof(nonces[0]);
 
@@ -119,6 +132,8 @@ TEST_CASE("nonce_cache_multiple", "[nonce_cache]")
  */
 TEST_CASE("nonce_cache_filled_sature", "[nonce_cache]")
 {
+    nonce_cache_test_reset();
+
     /* Remplir exactement le cache */
     for (uint32_t i = 1; i <= NONCE_CACHE_SIZE; i++) {
         nonce_cache_add(&s_cache, i);
@@ -139,6 +154,8 @@ TEST_CASE("nonce_cache_filled_sature", "[nonce_cache]")
  */
 TEST_CASE("nonce_cache_wrap_around", "[nonce_cache]")
 {
+    nonce_cache_test_reset();
+
     /* Remplir le cache avec les nonces 1..SIZE */
     for (uint32_t i = 1; i <= NONCE_CACHE_SIZE; i++) {
         nonce_cache_add(&s_cache, i);
@@ -170,6 +187,8 @@ TEST_CASE("nonce_cache_wrap_around", "[nonce_cache]")
  */
 TEST_CASE("nonce_cache_wrap_complet", "[nonce_cache]")
 {
+    nonce_cache_test_reset();
+
     const uint32_t total = NONCE_CACHE_SIZE * 2;
 
     /* Ajout des nonces 1..2*SIZE */
@@ -195,6 +214,8 @@ TEST_CASE("nonce_cache_wrap_complet", "[nonce_cache]")
  */
 TEST_CASE("nonce_cache_doublon", "[nonce_cache]")
 {
+    nonce_cache_test_reset();
+
     nonce_cache_add(&s_cache, 42);
     nonce_cache_add(&s_cache, 42);
 

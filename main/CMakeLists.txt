@@ -19,6 +19,7 @@ set(meshpay_main_srcs
     # Persistance NVS (Lot D.2)
     "persistence/nvs_keypair.c"
     "persistence/nvs_checkpoint.c"
+    "persistence/ledger_store.c"
     "persistence/nvs_alias.c"
     "persistence/nvs_next_seq.c"
     "persistence/nvs_beneficiary.c"

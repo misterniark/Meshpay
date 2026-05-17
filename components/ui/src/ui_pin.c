@@ -87,7 +87,8 @@ static const uint8_t s_weak_pins[][UI_PIN_LENGTH] = {
     {0,0,0,0}, {1,1,1,1}, {2,2,2,2}, {3,3,3,3}, {4,4,4,4},
     {5,5,5,5}, {6,6,6,6}, {7,7,7,7}, {8,8,8,8}, {9,9,9,9},
     /* Suites croissantes */
-    {1,2,3,4}, {2,3,4,5}, {3,4,5,6}, {4,5,6,7}, {5,6,7,8}, {6,7,8,9},
+    {0,1,2,3}, {1,2,3,4}, {2,3,4,5}, {3,4,5,6}, {4,5,6,7},
+    {5,6,7,8}, {6,7,8,9},
     /* Suites decroissantes (completees) */
     {9,8,7,6}, {8,7,6,5}, {7,6,5,4}, {6,5,4,3}, {5,4,3,2}, {4,3,2,1},
     {3,2,1,0},
@@ -393,11 +394,11 @@ uint32_t ui_pin_cooldown_remaining(hal_storage_t *storage)
     int64_t last_fail = read_fail_time(storage);
     int64_t now = esp_timer_get_time();
 
-    /* [Fix B4] meme protection que dans ui_pin_verify : si le timestamp
-       NVS est posterieur a l'horloge monotone (reboot intervenu), on
-       considere le cooldown ecoule pour eviter un blocage permanent. */
+    /* Meme politique que ui_pin_verify : si le timestamp NVS est posterieur
+       a l'horloge monotone, on considere qu'un reboot est intervenu et on
+       penalise avec le cooldown complet pour eviter le bypass par reboot. */
     if (now < last_fail) {
-        return 0;
+        return required_delay;
     }
 
     int64_t elapsed_s = (now - last_fail) / 1000000;

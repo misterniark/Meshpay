@@ -3,8 +3,8 @@
  * @brief Synchronisation LoRa périodique — broadcast et réception.
  *
  * Cycle de sync (~2 minutes, avec jitter) :
- * 0. Au boot, attendre un délai aléatoire dans [0, interval] avant
- *    le 1er cycle (jitter de boot, cf. lora_sync_jitter.h).
+ * 0. Au boot, attendre un court délai aléatoire avant le 1er cycle
+ *    pour permettre le rattrapage rapide d'un device qui revient.
  * 1. Acquérir le mutex du DAG
  * 2. Parcourir le DAG pour trouver les TX CONFIRMED récentes
  *    (timestamp > dernier_sync)
@@ -35,6 +35,7 @@
 #include "esp_random.h"        /* esp_random() : source d'aléa hardware */
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include <stdlib.h>
 #include <string.h>
 
 /**
@@ -45,6 +46,15 @@
  * aucun ne reçoit l'autre, le DAG ne se propage pas).
  */
 #define LORA_SYNC_JITTER_PCT 25U
+
+/*
+ * Le premier gossip doit arriver vite quand un device est debranche puis
+ * rebranche : son checkpoint local peut etre plus ancien que la DAG des
+ * peers restes online. Les cycles suivants gardent l'intervalle normal.
+ */
+#define LORA_SYNC_BOOT_CATCHUP_MAX_MS 5000U
+#define LORA_SYNC_MAX_TX_PER_CYCLE 8U
+#define LORA_SYNC_MAX_ATTEST_PER_CYCLE COMM_MSG_DAG_ATTEST_BATCH_MAX
 
 static const char *TAG = "lora_sync";
 
@@ -103,6 +113,214 @@ static size_t  s_tx_packet_lens[LORA_FRAG_MAX_FRAGMENTS];
  * directement (le user_ctx est utilisé pour ça).
  */
 static const lora_sync_config_t *s_config_ref = NULL;
+
+static void lora_sync_send_one_tx(const lora_sync_config_t *config,
+                                  const transaction_t *tx,
+                                  uint32_t index, uint32_t total);
+
+static void write_u16_be(uint8_t *dst, uint16_t val)
+{
+    dst[0] = (uint8_t)(val >> 8);
+    dst[1] = (uint8_t)val;
+}
+
+static void write_u64_be(uint8_t *dst, uint64_t val)
+{
+    for (int i = 7; i >= 0; i--) {
+        dst[7 - i] = (uint8_t)(val >> (i * 8));
+    }
+}
+
+static bool lora_is_own_key(const lora_sync_config_t *config,
+                            const public_key_t *key)
+{
+    return config && config->own_pubkey && key &&
+           public_key_equal(config->own_pubkey, key);
+}
+
+static esp_err_t sign_dag_summary(const lora_sync_config_t *config,
+                                  comm_msg_dag_summary_t *msg)
+{
+    if (!config || !config->own_keypair || !msg ||
+        msg->tip_count > COMM_MSG_DAG_SUMMARY_MAX_TIPS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t signed_buf[8 + 8 + 2 + 1 +
+                       (COMM_MSG_DAG_SUMMARY_MAX_TIPS * CRYPTO_HASH_SIZE)];
+    size_t signed_len = 0;
+    write_u64_be(&signed_buf[signed_len], msg->checkpoint_timestamp);
+    signed_len += 8;
+    write_u64_be(&signed_buf[signed_len], msg->last_tx_timestamp);
+    signed_len += 8;
+    write_u16_be(&signed_buf[signed_len], msg->tx_count_window);
+    signed_len += 2;
+    signed_buf[signed_len++] = msg->tip_count;
+    for (uint8_t i = 0; i < msg->tip_count; i++) {
+        memcpy(&signed_buf[signed_len], msg->tips[i].bytes, CRYPTO_HASH_SIZE);
+        signed_len += CRYPTO_HASH_SIZE;
+    }
+
+    return crypto_sign(signed_buf, signed_len, config->own_keypair,
+                       &msg->signature);
+}
+
+static esp_err_t sign_dag_request(const lora_sync_config_t *config,
+                                  comm_msg_dag_request_t *msg)
+{
+    if (!config || !config->own_keypair || !msg || msg->max_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t signed_buf[CRYPTO_PUBLIC_KEY_SIZE + 8 + 1];
+    size_t signed_len = 0;
+    memcpy(&signed_buf[signed_len], msg->target_key.bytes,
+           CRYPTO_PUBLIC_KEY_SIZE);
+    signed_len += CRYPTO_PUBLIC_KEY_SIZE;
+    write_u64_be(&signed_buf[signed_len], msg->since_timestamp);
+    signed_len += 8;
+    signed_buf[signed_len++] = msg->max_count;
+
+    return crypto_sign(signed_buf, signed_len, config->own_keypair,
+                       &msg->signature);
+}
+
+static bool lora_send_dag_summary(const lora_sync_config_t *config)
+{
+    if (!config || !config->get_dag_summary ||
+        !config->own_pubkey || !config->own_keypair) {
+        return false;
+    }
+
+    lora_dag_summary_t local;
+    memset(&local, 0, sizeof(local));
+    if (!config->get_dag_summary(&local, config->collect_ctx)) {
+        return false;
+    }
+
+    comm_msg_dag_summary_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.node_key = *config->own_pubkey;
+    msg.checkpoint_timestamp = local.checkpoint_timestamp;
+    msg.last_tx_timestamp = local.last_tx_timestamp;
+    msg.tx_count_window = local.tx_count_window;
+    msg.tip_count = local.tip_count;
+    if (msg.tip_count > COMM_MSG_DAG_SUMMARY_MAX_TIPS) {
+        msg.tip_count = COMM_MSG_DAG_SUMMARY_MAX_TIPS;
+    }
+    for (uint8_t i = 0; i < msg.tip_count; i++) {
+        msg.tips[i] = local.tips[i];
+    }
+
+    if (sign_dag_summary(config, &msg) != ESP_OK) {
+        ESP_LOGW(TAG, "DAG_SUMMARY non emis : signature impossible");
+        return false;
+    }
+
+    uint8_t buf[COMM_MSG_DAG_SUMMARY_MAX_SIZE];
+    size_t len = 0;
+    if (comm_msg_pack_dag_summary(buf, sizeof(buf), &msg, &len) != 0) {
+        return false;
+    }
+
+    hal_err_t err = config->lora->send(buf, len, config->lora->ctx);
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "Echec envoi DAG_SUMMARY");
+        return false;
+    }
+    ESP_LOGI(TAG, "DAG_SUMMARY envoye (last=%llu, tx=%u)",
+             (unsigned long long)msg.last_tx_timestamp,
+             (unsigned)msg.tx_count_window);
+    return true;
+}
+
+static bool lora_send_dag_request(const lora_sync_config_t *config,
+                                  const public_key_t *target,
+                                  uint64_t since_ts,
+                                  uint8_t max_count)
+{
+    if (!config || !config->own_pubkey || !config->own_keypair ||
+        !target || max_count == 0) {
+        return false;
+    }
+
+    comm_msg_dag_request_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.requester_key = *config->own_pubkey;
+    msg.target_key = *target;
+    msg.since_timestamp = since_ts;
+    msg.max_count = max_count;
+
+    if (sign_dag_request(config, &msg) != ESP_OK) {
+        ESP_LOGW(TAG, "DAG_REQUEST non emis : signature impossible");
+        return false;
+    }
+
+    uint8_t buf[COMM_MSG_DAG_REQUEST_SIZE];
+    size_t len = 0;
+    if (comm_msg_pack_dag_request(buf, sizeof(buf), &msg, &len) != 0) {
+        return false;
+    }
+
+    hal_err_t err = config->lora->send(buf, len, config->lora->ctx);
+    if (err != HAL_OK) {
+        ESP_LOGW(TAG, "Echec envoi DAG_REQUEST");
+        return false;
+    }
+    ESP_LOGI(TAG, "DAG_REQUEST envoye (since=%llu, max=%u)",
+             (unsigned long long)since_ts, (unsigned)max_count);
+    return true;
+}
+
+static void lora_send_attestation_batch(const lora_sync_config_t *config)
+{
+    if (!config || !config->collect_attestations) {
+        return;
+    }
+
+    comm_msg_attestation_t attestations[LORA_SYNC_MAX_ATTEST_PER_CYCLE];
+    uint32_t count = config->collect_attestations(attestations,
+                                                  LORA_SYNC_MAX_ATTEST_PER_CYCLE,
+                                                  config->collect_ctx);
+    if (count == 0) {
+        return;
+    }
+    if (count > LORA_SYNC_MAX_ATTEST_PER_CYCLE) {
+        count = LORA_SYNC_MAX_ATTEST_PER_CYCLE;
+    }
+
+    uint32_t idx = 0;
+    while (idx < count) {
+        comm_msg_dag_attest_batch_t batch;
+        memset(&batch, 0, sizeof(batch));
+        batch.attester_key = attestations[idx].attester_key;
+
+        while (idx < count &&
+               batch.count < COMM_MSG_DAG_ATTEST_BATCH_MAX &&
+               public_key_equal(&batch.attester_key,
+                                &attestations[idx].attester_key)) {
+            batch.signatures[batch.count] = attestations[idx].signature;
+            batch.tx_ids[batch.count] = attestations[idx].tx_id;
+            batch.count++;
+            idx++;
+        }
+
+        uint8_t buf[COMM_MSG_DAG_ATTEST_BATCH_MAX_SIZE];
+        size_t len = 0;
+        if (comm_msg_pack_dag_attest_batch(buf, sizeof(buf),
+                                           &batch, &len) != 0) {
+            ESP_LOGW(TAG, "DAG_ATTEST_BATCH non emis : pack impossible");
+            continue;
+        }
+        hal_err_t err = config->lora->send(buf, len, config->lora->ctx);
+        if (err != HAL_OK) {
+            ESP_LOGW(TAG, "Echec envoi DAG_ATTEST_BATCH");
+        } else {
+            ESP_LOGI(TAG, "DAG_ATTEST_BATCH envoye (%u attest)",
+                     (unsigned)batch.count);
+        }
+    }
+}
 
 /* ================================================================
  * Callback de réception LoRa
@@ -500,6 +718,122 @@ void lora_sync_handle_rx(const lora_sync_config_t *config,
         break;
     }
 
+    case COMM_MSG_LORA_DAG_SUMMARY: {
+        comm_msg_dag_summary_t summary;
+        if (comm_msg_unpack_dag_summary(data, len, &summary) != 0) {
+            ESP_LOGW(TAG, "DAG_SUMMARY malforme");
+            return;
+        }
+        if (comm_msg_verify_dag_summary(&summary) != 0) {
+            ESP_LOGW(TAG, "DAG_SUMMARY rejete : signature invalide");
+            return;
+        }
+        if (lora_is_own_key(config, &summary.node_key)) {
+            return;
+        }
+
+        lora_dag_summary_t local;
+        memset(&local, 0, sizeof(local));
+        if (!config->get_dag_summary ||
+            !config->get_dag_summary(&local, config->collect_ctx)) {
+            return;
+        }
+
+        if (summary.last_tx_timestamp > local.last_tx_timestamp) {
+            uint64_t since = local.last_tx_timestamp;
+            (void)lora_send_dag_request(config, &summary.node_key,
+                                        since, LORA_SYNC_MAX_TX_PER_CYCLE);
+            ESP_LOGI(TAG, "DAG_SUMMARY plus recent recu (peer=%02x, last=%llu > local=%llu)",
+                     summary.node_key.bytes[0],
+                     (unsigned long long)summary.last_tx_timestamp,
+                     (unsigned long long)local.last_tx_timestamp);
+        }
+        break;
+    }
+
+    case COMM_MSG_LORA_DAG_REQUEST: {
+        comm_msg_dag_request_t req;
+        if (comm_msg_unpack_dag_request(data, len, &req) != 0) {
+            ESP_LOGW(TAG, "DAG_REQUEST malforme");
+            return;
+        }
+        if (comm_msg_verify_dag_request(&req) != 0) {
+            ESP_LOGW(TAG, "DAG_REQUEST rejete : signature invalide");
+            return;
+        }
+        if (lora_is_own_key(config, &req.requester_key)) {
+            return;
+        }
+        if (!public_key_is_zero(&req.target_key) &&
+            !lora_is_own_key(config, &req.target_key)) {
+            return;
+        }
+        if (!config->collect_confirmed_txs) {
+            return;
+        }
+
+        uint32_t max_count = req.max_count;
+        if (max_count > LORA_SYNC_MAX_TX_PER_CYCLE) {
+            max_count = LORA_SYNC_MAX_TX_PER_CYCLE;
+        }
+
+        transaction_t *txs = (transaction_t *)malloc(sizeof(transaction_t) * max_count);
+        if (txs == NULL) {
+            ESP_LOGW(TAG, "DAG_REQUEST ignore : alloc TX impossible");
+            return;
+        }
+
+        uint64_t newest_ts = req.since_timestamp;
+        uint32_t tx_count = config->collect_confirmed_txs(req.since_timestamp,
+                                                          txs,
+                                                          max_count,
+                                                          &newest_ts,
+                                                          config->collect_ctx);
+        ESP_LOGI(TAG, "DAG_REQUEST recu (since=%llu) : %lu TX a renvoyer",
+                 (unsigned long long)req.since_timestamp,
+                 (unsigned long)tx_count);
+        for (uint32_t i = 0; i < tx_count; i++) {
+            lora_sync_send_one_tx(config, &txs[i], i, tx_count);
+        }
+        free(txs);
+        break;
+    }
+
+    case COMM_MSG_LORA_DAG_ATTEST_BATCH: {
+        comm_msg_dag_attest_batch_t batch;
+        if (comm_msg_unpack_dag_attest_batch(data, len, &batch) != 0) {
+            ESP_LOGW(TAG, "DAG_ATTEST_BATCH malforme");
+            return;
+        }
+        if (lora_is_own_key(config, &batch.attester_key)) {
+            return;
+        }
+
+        uint32_t accepted = 0;
+        for (uint8_t i = 0; i < batch.count; i++) {
+            comm_msg_attestation_t att;
+            memset(&att, 0, sizeof(att));
+            att.attester_key = batch.attester_key;
+            att.signature = batch.signatures[i];
+            att.tx_id = batch.tx_ids[i];
+
+            if (comm_msg_verify_attestation(&att) != 0) {
+                ESP_LOGW(TAG, "DAG_ATTEST_BATCH entree rejetee : signature invalide");
+                continue;
+            }
+
+            comm_event_t evt;
+            memset(&evt, 0, sizeof(evt));
+            evt.type = COMM_EVT_ATTESTATION_RECEIVED;
+            memcpy(&evt.data.attestation, &att, sizeof(att));
+            xQueueSend(config->evt_queue, &evt, 0);
+            accepted++;
+        }
+        ESP_LOGI(TAG, "DAG_ATTEST_BATCH recu (%lu/%u valides)",
+                 (unsigned long)accepted, (unsigned)batch.count);
+        break;
+    }
+
     case COMM_MSG_LORA_SET_ALIAS: {
         /*
          * Renommage distant par le maître.
@@ -655,6 +989,9 @@ void lora_sync_do_cycle(const lora_sync_config_t *config,
 {
     if (!config || !config->collect_confirmed_txs || !last_sync_ts) return;
 
+    (void)lora_send_dag_summary(config);
+    lora_send_attestation_batch(config);
+
     /*
      * Si ce device est un maître temporel, broadcaster son temps
      * avant de synchroniser les TX. Le message TIME_SYNC permet aux
@@ -729,13 +1066,25 @@ void lora_sync_do_cycle(const lora_sync_config_t *config,
      * verrouillage applicatif et copie les TX dans tx_to_send. La
      * couche LoRa n'a plus de visibilite sur le DAG ni sur le mutex.
      */
-    #define SYNC_MAX_TX_PER_CYCLE 8
-    transaction_t tx_to_send[SYNC_MAX_TX_PER_CYCLE];
+    transaction_t tx_to_send[LORA_SYNC_MAX_TX_PER_CYCLE];
     uint64_t newest_ts = *last_sync_ts;
 
-    uint32_t tx_count = config->collect_confirmed_txs(*last_sync_ts,
+    /*
+     * Gossip de rattrapage : republier la fenetre DAG confirmee a chaque
+     * cycle au lieu de n'envoyer que les TX plus recentes que le dernier
+     * cycle local. Sinon, un device debranche pendant quelques minutes
+     * revient avec un DAG vide et les peers online ne lui renvoient plus
+     * l'historique, car leur last_sync_ts a deja avance.
+     *
+     * Les doublons sont dedupes par dag_merge_transaction cote reception.
+     * Le cout radio reste acceptable pour le prototype car le callback
+     * limite a SYNC_MAX_TX_PER_CYCLE TX par cycle. A terme il faudra un
+     * vrai protocole pull avec resume/checkpoint par peer.
+     */
+    uint64_t gossip_since = 0;
+    uint32_t tx_count = config->collect_confirmed_txs(gossip_since,
                                                        tx_to_send,
-                                                       SYNC_MAX_TX_PER_CYCLE,
+                                                       LORA_SYNC_MAX_TX_PER_CYCLE,
                                                        &newest_ts,
                                                        config->collect_ctx);
 
@@ -834,16 +1183,16 @@ void lora_sync_task(void *param)
     config->lora->start_rx(config->lora->ctx);
 
     /*
-     * Jitter de boot : décale le tout premier cycle d'un délai aléatoire
-     * dans [0, sync_interval_ms]. Sans ça, deux devices bootés en
-     * quasi-simultané (USB hub) entreraient en cycle au même tick →
-     * collision LoRa systématique (cf. lora_sync_jitter.h).
+     * Catch-up de boot : le premier cycle part rapidement pour ne pas
+     * laisser un device revenu en ligne afficher longtemps son checkpoint
+     * local stale. On garde un petit jitter pour eviter les collisions si
+     * plusieurs cartes sont rebranchees ensemble.
      */
     uint32_t boot_delay_ms =
-        lora_jitter_initial_ms(config->sync_interval_ms, esp_random());
+        lora_jitter_initial_ms(LORA_SYNC_BOOT_CATCHUP_MAX_MS, esp_random());
     ESP_LOGI(TAG,
              "Tâche LoRa sync démarrée (intervalle=%lums, "
-             "boot jitter=%lums, jitter cycle=±%u%%)",
+             "catch-up boot=%lums, jitter cycle=±%u%%)",
              (unsigned long)config->sync_interval_ms,
              (unsigned long)boot_delay_ms,
              (unsigned)LORA_SYNC_JITTER_PCT);

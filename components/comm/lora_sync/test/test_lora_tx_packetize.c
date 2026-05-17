@@ -127,13 +127,17 @@ TEST_CASE("packetize_large_tx_roundtrip", "[lora_tx_packetize]")
 
     /*
      * Le buffer réassemblé est le CBOR nu : tx_deserialize() doit
-     * reconstruire la TX à l'identique. memset(0) garantit que les octets
-     * de padding de `restored` matchent ceux d'`original`.
+     * reconstruire les champs signés à l'identique. Pour un TRANSFER reçu
+     * du réseau, le status est volontairement forcé à LOCKED : le champ
+     * status n'est pas signé et ne doit pas pouvoir être accepté comme
+     * CONFIRMED sans ACK/attestation.
      */
     transaction_t restored;
     memset(&restored, 0, sizeof(restored));
     TEST_ASSERT_EQUAL(ESP_OK, tx_deserialize(result, result_len, &restored));
-    TEST_ASSERT_EQUAL_MEMORY(&original, &restored, sizeof(transaction_t));
+    transaction_t expected = original;
+    expected.status = TX_STATUS_LOCKED;
+    TEST_ASSERT_EQUAL_MEMORY(&expected, &restored, sizeof(transaction_t));
 }
 
 TEST_CASE("packetize_created_mint_roundtrip_valid_signature", "[lora_tx_packetize]")

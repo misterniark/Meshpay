@@ -15,11 +15,96 @@
 #include "dag/dag.h"
 #include "dag/dag_prune.h"
 #include "dag/dag_validate.h"
+#include "persistence/ledger_store.h"
 #include "persistence/nvs_next_seq.h"
 #include "time_glue.h"
 #include "wallet/wallet_checkpoint.h"
 
 static const char *TAG = "dag_glue";
+
+static const public_key_t *current_fee_recipient(void)
+{
+    return (s_currency.mint_authority_count > 0)
+               ? &s_currency.mint_authorities[0]
+               : NULL;
+}
+
+static void prune_after_checkpoint_if_needed(uint64_t checkpoint_timestamp)
+{
+    if (checkpoint_timestamp > 0) {
+        dag_prune_before(&s_dag, checkpoint_timestamp);
+    } else {
+        ESP_LOGW(TAG, "Checkpoint timestamp=0 : prune saute pour eviter "
+                      "la suppression silencieuse de TX timestamp=0");
+    }
+}
+
+static esp_err_t commit_runtime_checkpoint(const checkpoint_t *checkpoint,
+                                           const char *reason)
+{
+    if (checkpoint == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_checkpoint_save) {
+        esp_err_t ret = s_checkpoint_save(checkpoint, NULL);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Sauvegarde checkpoint echoue (%s): %s",
+                     reason ? reason : "?", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
+    /*
+     * Phase D : la fenetre durable est une fenetre d'historique/reseau,
+     * pas un simple miroir du DAG RAM. On la fusionne avant le prune,
+     * sinon les TX confirmees juste consolidees disparaitraient de
+     * l'historique UI et du gossip LoRa post-reboot.
+     */
+    esp_err_t ret = ledger_tx_window_save_from_dag(reason);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Sauvegarde fenetre TX echoue (%s): %s",
+                 reason ? reason : "?", esp_err_to_name(ret));
+        return ret;
+    }
+
+    memcpy(&s_checkpoint, checkpoint, sizeof(s_checkpoint));
+    prune_after_checkpoint_if_needed(s_checkpoint.timestamp);
+    nvs_persist_own_max_seq();
+
+    /*
+     * Re-sauver apres prune est peu couteux ici et capture l'etat RAM
+     * final tout en conservant les anciennes TX grace a la fusion.
+     */
+    (void)ledger_tx_window_save_from_dag(reason);
+    return ESP_OK;
+}
+
+esp_err_t persist_runtime_checkpoint(const char *reason)
+{
+    static checkpoint_t durable_chk;
+    memset(&durable_chk, 0, sizeof(durable_chk));
+
+    esp_err_t ret = checkpoint_create_ext(&s_dag, &s_checkpoint,
+                                          current_fee_recipient(),
+                                          &durable_chk, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Snapshot checkpoint runtime echoue (%s): %s",
+                 reason ? reason : "?", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = commit_runtime_checkpoint(&durable_chk, reason);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Snapshot checkpoint runtime commit (%s, ts=%llu, reste=%"PRIu32" TX)",
+             reason ? reason : "?",
+             (unsigned long long)durable_chk.timestamp,
+             s_dag.count);
+    return ESP_OK;
+}
 
 void auto_checkpoint_if_needed(void)
 {
@@ -42,11 +127,6 @@ void auto_checkpoint_if_needed(void)
      * indiquer "fees brûlés" plutôt que d'accéder à l'index 0 d'un
      * tableau sans contenu garanti.
      */
-    const public_key_t *fee_recipient =
-        (s_currency.mint_authority_count > 0)
-            ? &s_currency.mint_authorities[0]
-            : NULL;
-
     /*
      * [F-WL-004] Si checkpoint_create échoue à cause d'une TX qui
      * provoque un overflow ou sature CHECKPOINT_MAX_ACCOUNTS, on
@@ -56,7 +136,7 @@ void auto_checkpoint_if_needed(void)
     hash_t failed_tx_id;
     memset(&failed_tx_id, 0, sizeof(failed_tx_id));
     esp_err_t ret = checkpoint_create_ext(&s_dag, &s_checkpoint,
-                                          fee_recipient,
+                                          current_fee_recipient(),
                                           &new_chk, &failed_tx_id);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Echec creation checkpoint automatique (%d)", ret);
@@ -109,39 +189,8 @@ void auto_checkpoint_if_needed(void)
      */
     new_chk.last_melt_timestamp = s_checkpoint.last_melt_timestamp;
 
-    memcpy(&s_checkpoint, &new_chk, sizeof(checkpoint_t));
-    if (s_checkpoint_save) {
-        s_checkpoint_save(&s_checkpoint, NULL);
-    }
-
-    /*
-     * [F-DG-011] Sauvegarder le max_seq du propriétaire en NVS dédiée.
-     * Cette clé est consultée au boot si NVS_KEY_NEXT_SEQ est perdu ET
-     * que le DAG est vide (post-prune). Sans cette persistance, le
-     * device repartait de seq=0 après corruption NVS+prune complet et
-     * était banni par les peers sur conflit de seq.
-     */
-    nvs_persist_own_max_seq();
-
-    /*
-     * Elaguer le DAG : sans cet elagage, le DAG se remplit jusqu'a
-     * DAG_MAX_TRANSACTIONS et bloque toute nouvelle insertion.
-     *
-     * [F-DG-013] Garde-fou timestamp > 0 : checkpoint_create initialise
-     * latest_timestamp a 0 et ne le met a jour que pour les TX
-     * CONFIRMED rencontrees. Si aucune TX CONFIRMED n'existe (DAG plein
-     * uniquement de LOCKED/CANCELLED ou device sans source de temps),
-     * new_chk.timestamp = 0 et dag_prune_before(_, 0) supprimerait toute
-     * TX dont le timestamp est 0 — destruction silencieuse difficile a
-     * diagnostiquer. Si timestamp == 0, on ne prune pas : le checkpoint
-     * suivant declenchera une vraie reduction quand des CONFIRMED
-     * arriveront.
-     */
-    if (new_chk.timestamp > 0) {
-        dag_prune_before(&s_dag, new_chk.timestamp);
-    } else {
-        ESP_LOGW(TAG, "Checkpoint timestamp=0 : prune saute pour eviter "
-                      "la suppression silencieuse de TX timestamp=0");
+    if (commit_runtime_checkpoint(&new_chk, "auto_checkpoint") != ESP_OK) {
+        return;
     }
 
     ESP_LOGI(TAG, "Checkpoint automatique cree + DAG elague "
@@ -188,5 +237,6 @@ esp_err_t dag_insert_and_track(const transaction_t *tx)
         return ret;
     }
     auto_checkpoint_if_needed();
+    (void)ledger_tx_window_save_from_dag("dag_insert");
     return ESP_OK;
 }

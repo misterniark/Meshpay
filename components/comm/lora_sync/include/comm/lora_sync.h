@@ -73,6 +73,23 @@ typedef uint32_t (*lora_collect_confirmed_txs_fn)(
     uint64_t       *out_newest_ts,
     void           *ctx);
 
+typedef struct {
+    uint64_t checkpoint_timestamp;
+    uint64_t last_tx_timestamp;
+    uint16_t tx_count_window;
+    uint8_t  tip_count;
+    hash_t   tips[COMM_MSG_DAG_SUMMARY_MAX_TIPS];
+} lora_dag_summary_t;
+
+typedef bool (*lora_get_dag_summary_fn)(
+    lora_dag_summary_t *out_summary,
+    void               *ctx);
+
+typedef uint32_t (*lora_collect_attestations_fn)(
+    comm_msg_attestation_t *out_buf,
+    uint32_t                max_count,
+    void                   *ctx);
+
 /**
  * Configuration du module de synchronisation LoRa.
  *
@@ -87,6 +104,8 @@ typedef struct {
      * qui faisait remonter un mutex applicatif jusque dans le
      * composant. */
     lora_collect_confirmed_txs_fn collect_confirmed_txs;
+    lora_get_dag_summary_fn get_dag_summary;
+    lora_collect_attestations_fn collect_attestations;
     void             *collect_ctx;      /* Passe tel quel au callback */
 
     uint32_t          sync_interval_ms; /* Intervalle de sync (défaut 120000) */

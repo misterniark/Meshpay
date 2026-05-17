@@ -7,8 +7,8 @@
  * `PSA_ERROR_NOT_SUPPORTED` en runtime car la lib mbedTLS d'IDF v5.4.3
  * ne fournit aucun driver Ed25519.
  *
- * Monocypher (vendoré dans `vendor/monocypher/`) fournit Ed25519 standard
- * RFC 8032 (SHA-512) sans dépendance externe. La signature reste sur le
+ * Monocypher (vendoré dans `vendor/monocypher/`) fournit l'API
+ * `crypto_ed25519_*` sans dépendance externe. La signature reste sur le
  * fil exactement la même (64 octets) : aucun impact sur le format wire.
  *
  * L'initialisation `crypto_init()` reste appelée au démarrage et le flag
@@ -51,7 +51,7 @@ esp_err_t crypto_sign(const uint8_t *data, size_t data_len,
     }
 
     /*
-     * Signature Ed25519 RFC 8032 (SHA-512).
+     * Signature via l'API `crypto_ed25519_*` Monocypher.
      * `keypair->private_key` est au format `seed[32] || public[32]`,
      * exactement le format `secret_key[64]` attendu par Monocypher.
      * La fonction est `void` : aucun chemin d'erreur cryptographique
@@ -90,7 +90,7 @@ esp_err_t crypto_verify(const uint8_t *data, size_t data_len,
     }
 
     /*
-     * Vérification Ed25519 RFC 8032 (SHA-512).
+     * Vérification via l'API `crypto_ed25519_*` Monocypher.
      * `crypto_ed25519_check` retourne :
      *   -  0 si la signature est valide
      *   - -1 si la signature est invalide

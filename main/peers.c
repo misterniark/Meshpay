@@ -39,7 +39,24 @@ void add_peer(const comm_peer_info_t *peer)
     /* Verifier si le peer existe deja (idempotent + LRU touch). */
     for (uint32_t i = 0; i < s_peer_count; i++) {
         if (public_key_equal(&s_peers[i].public_key, &peer->public_key)) {
+            memcpy(s_peers[i].mac_addr, peer->mac_addr,
+                   sizeof(s_peers[i].mac_addr));
+
+            /*
+             * DISCOVER ne transporte pas d'alias et peut donc creer une
+             * entree vide. Un ANNOUNCE ulterieur pour la meme pubkey doit
+             * enrichir l'entree existante, sinon l'ecran Payer reste sur
+             * "Sans nom" meme apres refresh.
+             */
+            if (peer->alias[0] != '\0') {
+                strncpy(s_peers[i].alias, peer->alias,
+                        sizeof(s_peers[i].alias) - 1);
+                s_peers[i].alias[sizeof(s_peers[i].alias) - 1] = '\0';
+            }
+
             touch_peer_at(i);
+            ESP_LOGI(TAG, "Peer existant rafraichi (idx=%"PRIu32", alias=%s)",
+                     i, s_peers[i].alias[0] ? s_peers[i].alias : "vide");
             return;
         }
     }

@@ -7,8 +7,8 @@
  * v5.4.3 (`psa_generate_key` retournait PSA_ERROR_NOT_SUPPORTED = -134).
  *
  * Monocypher 4.0.2 est vendoré dans `vendor/monocypher/` et fournit
- * Ed25519 standard RFC 8032 (SHA-512). La randomness vient du TRNG
- * matériel ESP32 via `esp_fill_random()`.
+ * l'API `crypto_ed25519_*` utilisée par Mesh Pay. La randomness vient
+ * du TRNG matériel ESP32 via `esp_fill_random()`.
  *
  * Format de la clé privée stockée : `seed[32] || public[32]` = 64 octets.
  * C'est le format `secret_key[64]` natif de Monocypher.

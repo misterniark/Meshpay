@@ -1,17 +1,25 @@
-# Mesh Pay Test App — Configuration commune
+# Mesh Pay Test App — Configuration ESP32-S3 / Waveshare 1.47"
 #
-# Cible esp32s3 par defaut (carte de dev actuellement connectee).
-# Pour basculer sur ESP32 CYD :
-#   rm test_app/sdkconfig && idf.py -C test_app set-target esp32
+# Le fichier test_app/sdkconfig est genere localement par ESP-IDF.
+# Si un vieux sdkconfig force encore esp32, regenerer avec :
+#   rm -rf test_app/build test_app/sdkconfig
+#   idf.py -C test_app set-target esp32s3
 
 # --- Console USB-OTG natif (Waveshare ESP32-S3-Touch-LCD-1.47) ---
+CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # --- Flash 16 MB + PSRAM octal 80 MHz (Waveshare 1.47") ---
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
+
+# --- LoRa : Waveshare Core1262 / SX1262 ---
+CONFIG_MESHPAY_LORA_DRIVER_CORE1262=y
+CONFIG_MESHPAY_LORA_C1262_PIN_MISO=10
 
 # --- Stack des taches IDLE/main pour les tests (Unity utilise du stack) ---
 # 80 KB : les tests DAG/wallet allouent un `dag_t` sur la stack (250 TX

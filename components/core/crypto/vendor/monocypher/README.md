@@ -1,6 +1,6 @@
 # Monocypher 4.0.2 — vendored
 
-Lib externe Ed25519 (RFC 8032, SHA-512) utilisée par Mesh Pay depuis le Lot E.2
+Lib externe fournissant l'API `crypto_ed25519_*` utilisée par Mesh Pay depuis le Lot E.2
 (mai 2026) en remplacement de l'API PSA Crypto de mbedTLS, qui ne fournit pas
 de driver Ed25519 dans IDF v5.4.3 (`PSA_ERROR_NOT_SUPPORTED`).
 
@@ -17,14 +17,17 @@ de driver Ed25519 dans IDF v5.4.3 (`PSA_ERROR_NOT_SUPPORTED`).
 | Fichier | Rôle |
 |---|---|
 | `monocypher.c` / `monocypher.h` | Coeur Monocypher (BLAKE2b, X25519, EdDSA-BLAKE2b, ChaCha20, etc.) |
-| `monocypher-ed25519.c` / `monocypher-ed25519.h` | **Ed25519 standard RFC 8032 (SHA-512)** — c'est ce qu'utilise Mesh Pay |
+| `monocypher-ed25519.c` / `monocypher-ed25519.h` | API `crypto_ed25519_*` Monocypher — c'est ce qu'utilise Mesh Pay |
 | `LICENSE.md` | Texte CC-0 + BSD-2 |
 
 ## Points d'attention
 
-- **Ne pas confondre `crypto_eddsa_*` (BLAKE2b, non-standard) et `crypto_ed25519_*`
-  (SHA-512, standard RFC 8032)**. Mesh Pay utilise exclusivement la variante
-  `crypto_ed25519_*` pour rester interopérable.
+- **Ne pas confondre `crypto_eddsa_*` (BLAKE2b) et `crypto_ed25519_*`
+  (SHA-512)**. Mesh Pay utilise exclusivement la variante `crypto_ed25519_*`.
+- Test d'interop : Monocypher 4.0.2 ne produit pas le vecteur public RFC8032
+  TEST 1 pour la seed officielle. Le protocole Mesh Pay reste cohérent entre
+  devices qui utilisent tous cette même dépendance, mais il ne faut pas annoncer
+  d'interop Ed25519/RFC8032 externe sans remplacer ou revalider la dépendance.
 - `monocypher-ed25519.c` embarque sa propre implémentation SHA-512 — pas de
   dépendance mbedTLS pour le hash de signature.
 - La randomness (seed Ed25519) est fournie par `esp_fill_random()` côté

@@ -3,7 +3,7 @@ set(crypto_srcs
     "src/crypto_keys.c"
     "src/crypto_sign.c"
     "src/crypto_hash.c"
-    # ----- Vendor Monocypher 4.0.2 (Ed25519 RFC 8032) -----
+    # ----- Vendor Monocypher 4.0.2 (API crypto_ed25519_*) -----
     # Depuis Lot E.2 (mai 2026) : mbedTLS ne fournit pas de driver Ed25519.
     # On utilise la lib externe Monocypher (CC-0 / BSD-2) vendoree ici
     # pour generer/signer/verifier les keypairs Ed25519 du protocole.

@@ -114,9 +114,9 @@ TEST_CASE("ack_pack_null_params", "[comm_msg]")
 {
     uint8_t buf[COMM_MSG_ESPNOW_MAX];
     size_t out_len = 0;
-    public_key_t key;
-    signature_t sig;
-    hash_t tx_id;
+    public_key_t key = {0};
+    signature_t sig = {0};
+    hash_t tx_id = {0};
 
     TEST_ASSERT_EQUAL(-1, comm_msg_pack_ack(NULL, sizeof(buf),
                                              &key, &sig, 0, &tx_id, &out_len));

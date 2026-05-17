@@ -56,8 +56,15 @@ esp_err_t initiate_mint(const public_key_t *to, uint32_t amount)
     hash_t parents[2];
     uint8_t parent_count;
     if (tip_count == 0) {
-        memset(&parents[0], 0, sizeof(hash_t));
-        parent_count = 1;
+        if (!hash_is_zero(&s_checkpoint.last_tx_id) &&
+            s_checkpoint.timestamp > 0) {
+            memcpy(&parents[0], &s_checkpoint.last_tx_id, sizeof(hash_t));
+            parent_count = 1;
+            ESP_LOGI(TAG, "MINT: parent issu du checkpoint (DAG vide)");
+        } else {
+            memset(&parents[0], 0, sizeof(hash_t));
+            parent_count = 1;
+        }
     } else {
         parent_count = (tip_count > 2) ? 2 : (uint8_t)tip_count;
         for (uint8_t i = 0; i < parent_count; i++) {
@@ -80,6 +87,7 @@ esp_err_t initiate_mint(const public_key_t *to, uint32_t amount)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Erreur insertion MINT dans DAG: %s", esp_err_to_name(ret));
     } else {
+        persist_runtime_checkpoint("mint");
         ESP_LOGI(TAG, "MINT cree: %"PRIu32" credits", amount);
     }
     return ret;

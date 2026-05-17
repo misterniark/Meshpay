@@ -63,7 +63,7 @@ static const char *TAG = "hal_lora_c1262";
 #define C1262_RX_TASK_PRIO   5
 
 /** Timeout d'attente de TX_DONE (ms). */
-#define C1262_TX_TIMEOUT_MS  4000
+#define C1262_TX_TIMEOUT_MS  8000
 
 /* ================================================================
  * Contexte interne
@@ -195,6 +195,38 @@ static hal_err_t apply_radio_config(core1262_ctx_t *ctx)
     return HAL_OK;
 }
 
+static hal_err_t recover_radio_locked(core1262_ctx_t *ctx, const char *why)
+{
+    if (ctx == NULL) {
+        return HAL_ERR_INVALID;
+    }
+
+    ESP_LOGW(TAG, "Recovery SX1262 (%s) : reset + reconfiguration (BUSY=%d)",
+             why ? why : "?", gpio_get_level(ctx->hw.pin_busy));
+
+    rf_switch_rx(ctx);
+    if (sx126x_hal_reset(&ctx->hw) != SX126X_HAL_STATUS_OK) {
+        ESP_LOGE(TAG, "Recovery SX1262 echouee : reset impossible (BUSY=%d)",
+                 gpio_get_level(ctx->hw.pin_busy));
+        return HAL_ERR_IO;
+    }
+
+    hal_err_t ret = apply_radio_config(ctx);
+    if (ret != HAL_OK) {
+        ESP_LOGE(TAG, "Recovery SX1262 echouee : config impossible (%d)", ret);
+        return ret;
+    }
+
+    rf_switch_rx(ctx);
+    if (ctx->rx_running) {
+        sx126x_set_rx_with_timeout_in_rtc_step(&ctx->hw, SX126X_RX_CONTINUOUS);
+    }
+
+    ESP_LOGI(TAG, "Recovery SX1262 terminee (BUSY=%d)",
+             gpio_get_level(ctx->hw.pin_busy));
+    return HAL_OK;
+}
+
 /* ================================================================
  * Tache de reception
  * ================================================================ */
@@ -239,8 +271,7 @@ static void c1262_rx_task(void *param)
             } else {
                 sx126x_rx_buffer_status_t rxb = {0};
                 if (sx126x_get_rx_buffer_status(sx, &rxb) == SX126X_STATUS_OK &&
-                    rxb.pld_len_in_bytes > 0 &&
-                    rxb.pld_len_in_bytes <= HAL_LORA_MAX_PACKET_SIZE) {
+                    rxb.pld_len_in_bytes > 0) {
 
                     if (sx126x_read_buffer(sx, rxb.buffer_start_pointer, pkt_buf,
                                            rxb.pld_len_in_bytes) == SX126X_STATUS_OK) {
@@ -510,6 +541,17 @@ static hal_err_t c1262_send(const uint8_t *data, size_t len, void *ctx_ptr)
     const void *sx = &ctx->hw;
     hal_err_t   result = HAL_OK;
 
+    /*
+     * Le SX1262 accepte mieux la transition RX continu -> TX quand on
+     * repasse explicitement en standby avant de modifier FIFO/params.
+     * Sans cette etape, certains cycles longs de gossip finissaient par
+     * ne plus voir TX_DONE alors que BUSY etait revenu a 0.
+     */
+    if (sx126x_set_standby(sx, SX126X_STANDBY_CFG_RC) != SX126X_STATUS_OK) {
+        result = HAL_ERR_IO;
+        goto done;
+    }
+
     /* 1. Ecrire la charge utile dans la FIFO. */
     if (sx126x_write_buffer(sx, 0x00, data, (uint8_t)len) != SX126X_STATUS_OK) {
         result = HAL_ERR_IO;
@@ -558,12 +600,22 @@ static hal_err_t c1262_send(const uint8_t *data, size_t len, void *ctx_ptr)
     }
 
 done:
-    /* Toujours rebasculer en reception continue si la tache RX tourne.
-     * On utilise sx126x_set_rx_with_timeout_in_rtc_step avec
-     * SX126X_RX_CONTINUOUS (0x00FFFFFF) pour la reception permanente. */
-    rf_switch_rx(ctx);
-    if (ctx->rx_running) {
-        sx126x_set_rx_with_timeout_in_rtc_step(sx, SX126X_RX_CONTINUOUS);
+    if (result != HAL_OK) {
+        /*
+         * Certains Core1262 restent bloques BUSY=1 apres une emission
+         * ratee. Si on se contente de relancer le cycle suivant, tous les
+         * acces SPI expirent jusqu'au reboot. On remet donc le SX1262 dans
+         * un etat connu pendant que le mutex radio est encore tenu.
+         */
+        (void)recover_radio_locked(ctx, "send failed");
+    } else {
+        /* Toujours rebasculer en reception continue si la tache RX tourne.
+         * On utilise sx126x_set_rx_with_timeout_in_rtc_step avec
+         * SX126X_RX_CONTINUOUS (0x00FFFFFF) pour la reception permanente. */
+        rf_switch_rx(ctx);
+        if (ctx->rx_running) {
+            sx126x_set_rx_with_timeout_in_rtc_step(sx, SX126X_RX_CONTINUOUS);
+        }
     }
     xSemaphoreGive(ctx->radio_mutex);
     ESP_LOGI(TAG, "send: sortie, result=%d BUSY=%d",

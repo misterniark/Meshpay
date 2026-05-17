@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 #include "app_state.h"  /* avant freertos/queue.h */
 #include "freertos/queue.h"
@@ -19,6 +20,7 @@
 #include "balance.h"
 #include "dag_glue.h"
 #include "peers.h"
+#include "persistence/ledger_store.h"
 #include "persistence/nvs_next_seq.h"
 #include "time_glue.h"
 #include "transaction/tx_create.h"
@@ -55,14 +57,23 @@ esp_err_t initiate_payment(const public_key_t *to, uint32_t amount)
     const transaction_t *tips[2];
     uint32_t tip_count = 0;
     dag_get_tips(&s_dag, tips, 2, &tip_count);
-    if (tip_count == 0) {
-        ESP_LOGE(TAG, "Pas de tips dans le DAG");
-        return ESP_ERR_INVALID_STATE;
-    }
     hash_t parents[2];
-    uint8_t parent_count = (tip_count > 2) ? 2 : (uint8_t)tip_count;
-    for (uint8_t i = 0; i < parent_count; i++) {
-        memcpy(&parents[i], &tips[i]->id, sizeof(hash_t));
+    uint8_t parent_count = 0;
+    if (tip_count == 0) {
+        if (!hash_is_zero(&s_checkpoint.last_tx_id) &&
+            s_checkpoint.timestamp > 0) {
+            memcpy(&parents[0], &s_checkpoint.last_tx_id, sizeof(hash_t));
+            parent_count = 1;
+            ESP_LOGI(TAG, "Paiement: parent issu du checkpoint (DAG vide)");
+        } else {
+            ESP_LOGE(TAG, "Pas de tips dans le DAG");
+            return ESP_ERR_INVALID_STATE;
+        }
+    } else {
+        parent_count = (tip_count > 2) ? 2 : (uint8_t)tip_count;
+        for (uint8_t i = 0; i < parent_count; i++) {
+            memcpy(&parents[i], &tips[i]->id, sizeof(hash_t));
+        }
     }
 
     /* 3. Creer la TX signee. */
@@ -100,12 +111,30 @@ esp_err_t initiate_payment(const public_key_t *to, uint32_t amount)
         if (cret != ESP_OK) {
             ESP_LOGE(TAG, "Rollback CANCELLED echoue (%d) — TX orpheline dans le DAG", cret);
         }
+        (void)ledger_tx_window_save_from_dag("payment_lock_rollback");
         return ret;
     }
 
     /* 6. Envoi ESP-NOW direct si peer connu, sinon attendre LoRa sync. */
     const uint8_t *dest_mac = find_peer_mac(to);
     if (dest_mac != NULL) {
+#if CONFIG_MESHPAY_TEST_DEVICE_SEED
+        /*
+         * En build test, pousser d'abord la self-MINT de seed : apres
+         * reboot la DAG locale est vide et le destinataire peut sinon
+         * rejeter notre TRANSFER avec CURRENCY_ERR_INSUFFICIENT.
+         */
+        transaction_t seed_tx;
+        if (test_device_seed_get_tx(&seed_tx)) {
+            comm_cmd_t seed_cmd;
+            memset(&seed_cmd, 0, sizeof(seed_cmd));
+            seed_cmd.type = COMM_CMD_SEND_TX;
+            memcpy(&seed_cmd.data.send_tx.tx, &seed_tx, sizeof(transaction_t));
+            memcpy(seed_cmd.data.send_tx.dest_mac, dest_mac, 6);
+            xQueueSend(s_cmd_queue, &seed_cmd, 0);
+        }
+#endif
+
         comm_cmd_t cmd;
         memset(&cmd, 0, sizeof(cmd));
         cmd.type = COMM_CMD_SEND_TX;

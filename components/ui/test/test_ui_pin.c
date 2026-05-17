@@ -22,9 +22,14 @@
 /** Instance mock du stockage, réinitialisée entre chaque test */
 static hal_storage_t s_storage;
 
-__attribute__((weak)) void setUp(void)
+static void ui_pin_test_reset(void)
 {
     hal_storage_mock_create(&s_storage);
+}
+
+__attribute__((weak)) void setUp(void)
+{
+    ui_pin_test_reset();
 }
 
 __attribute__((weak)) void tearDown(void)
@@ -46,6 +51,8 @@ __attribute__((weak)) void tearDown(void)
  */
 TEST_CASE("pin_weak_detection", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     /* Répétitions simples (0000 à 9999) */
     for (uint8_t d = 0; d <= 9; d++) {
         const uint8_t pin[UI_PIN_LENGTH] = {d, d, d, d};
@@ -93,6 +100,8 @@ TEST_CASE("pin_weak_detection", "[ui_pin]")
  */
 TEST_CASE("pin_register_ok", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t pin[] = {7, 3, 9, 1};
 
     ui_pin_result_t result = ui_pin_register(pin, &s_storage);
@@ -110,6 +119,8 @@ TEST_CASE("pin_register_ok", "[ui_pin]")
  */
 TEST_CASE("pin_register_weak_rejected", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t weak_pin[] = {1, 2, 3, 4};
 
     ui_pin_result_t result = ui_pin_register(weak_pin, &s_storage);
@@ -131,6 +142,8 @@ TEST_CASE("pin_register_weak_rejected", "[ui_pin]")
  */
 TEST_CASE("pin_verify_correct", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t pin[] = {7, 3, 9, 1};
 
     ui_pin_register(pin, &s_storage);
@@ -147,6 +160,8 @@ TEST_CASE("pin_verify_correct", "[ui_pin]")
  */
 TEST_CASE("pin_verify_wrong", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t correct_pin[] = {7, 3, 9, 1};
     const uint8_t wrong_pin[]   = {9, 8, 7, 6};
 
@@ -171,6 +186,8 @@ TEST_CASE("pin_verify_wrong", "[ui_pin]")
  */
 TEST_CASE("pin_verify_wrong_increments_counter", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t correct_pin[] = {7, 3, 9, 1};
     const uint8_t wrong_pin[]   = {9, 8, 7, 6};
 
@@ -198,6 +215,8 @@ TEST_CASE("pin_verify_wrong_increments_counter", "[ui_pin]")
  */
 TEST_CASE("pin_verify_correct_resets_counter", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t correct_pin[] = {7, 3, 9, 1};
     const uint8_t wrong_pin[]   = {9, 8, 7, 6};
 
@@ -228,6 +247,8 @@ TEST_CASE("pin_verify_correct_resets_counter", "[ui_pin]")
  */
 TEST_CASE("pin_blocked_after_10_failures", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t correct_pin[] = {7, 3, 9, 1};
 
     ui_pin_register(correct_pin, &s_storage);
@@ -243,8 +264,7 @@ TEST_CASE("pin_blocked_after_10_failures", "[ui_pin]")
 }
 
 /**
- * @brief Cooldown ignoré si le timestamp NVS est futur (bug B4 du rapport
- *        d'audit Lot A).
+ * @brief Cooldown redémarré si le timestamp NVS est futur.
  *
  * Scénario : un timestamp persisté en NVS provient d'une session
  * antérieure où esp_timer_get_time() avait une valeur élevée. Après
@@ -257,10 +277,13 @@ TEST_CASE("pin_blocked_after_10_failures", "[ui_pin]")
  * supérieur à toute valeur courante d'esp_timer_get_time()).
  *
  * Résultat attendu : la vérification avec le bon PIN doit retourner
- * UI_PIN_OK (cooldown considéré expiré), pas UI_PIN_COOLDOWN.
+ * UI_PIN_COOLDOWN. Depuis F-UI-007, un reboot pendant le délai ne permet
+ * pas de contourner l'anti brute-force.
  */
 TEST_CASE("pin_cooldown_stale_timestamp_after_reboot", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t correct_pin[] = {7, 3, 9, 1};
 
     ui_pin_register(correct_pin, &s_storage);
@@ -275,21 +298,23 @@ TEST_CASE("pin_cooldown_stale_timestamp_after_reboot", "[ui_pin]")
                          (const uint8_t *)&stale, sizeof(stale),
                          s_storage.ctx);
 
-    /* Bon PIN : doit passer le cooldown grace au fix B4 */
+    /* Bon PIN : le cooldown complet redémarre après reboot suspect. */
     ui_pin_result_t result = ui_pin_verify(correct_pin, &s_storage);
-    TEST_ASSERT_EQUAL_MESSAGE(UI_PIN_OK, result,
-        "Un timestamp NVS futur ne doit pas verrouiller indefiniment "
-        "le cooldown apres reboot");
+    TEST_ASSERT_EQUAL_MESSAGE(UI_PIN_COOLDOWN, result,
+        "Un timestamp NVS futur doit redemarrer le cooldown anti-bypass");
 }
 
 /**
- * @brief ui_pin_cooldown_remaining() retourne 0 si le timestamp est futur.
+ * @brief ui_pin_cooldown_remaining() retourne le delai complet si le
+ *        timestamp est futur.
  *
  * Variante de pin_cooldown_stale_timestamp_after_reboot ciblant
  * l'accesseur public utilisé par l'UI pour afficher le temps restant.
  */
 TEST_CASE("pin_cooldown_remaining_stale_timestamp", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t correct_pin[] = {7, 3, 9, 1};
 
     ui_pin_register(correct_pin, &s_storage);
@@ -301,8 +326,8 @@ TEST_CASE("pin_cooldown_remaining_stale_timestamp", "[ui_pin]")
                          s_storage.ctx);
 
     uint32_t remaining = ui_pin_cooldown_remaining(&s_storage);
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, remaining,
-        "Un timestamp NVS futur doit etre traite comme cooldown ecoule");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(30, remaining,
+        "Un timestamp NVS futur doit afficher le cooldown complet");
 }
 
 /* ========================================================================= */
@@ -317,6 +342,8 @@ TEST_CASE("pin_cooldown_remaining_stale_timestamp", "[ui_pin]")
  */
 TEST_CASE("pin_not_configured", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     TEST_ASSERT_FALSE(ui_pin_is_configured(&s_storage));
 }
 
@@ -330,6 +357,8 @@ TEST_CASE("pin_not_configured", "[ui_pin]")
  */
 TEST_CASE("pin_register_overwrites", "[ui_pin]")
 {
+    ui_pin_test_reset();
+
     const uint8_t pin_a[] = {7, 3, 9, 1};
     const uint8_t pin_b[] = {5, 8, 2, 6};
 

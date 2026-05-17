@@ -30,15 +30,7 @@ idf_build_get_property(project_name PROJECT_NAME)
 if(project_name STREQUAL "meshpay_test_app")
     list(APPEND ui_srcs
         "test/test_ui_pin.c"
-        # TODO Lot E.1bis : test_ui_manager.c definit des stubs
-        # `ui_screen_*_handler` qui sont en conflit avec les vrais
-        # `src/ui_screen_*.c` du meme composant (multiple definition
-        # au linkage). Ce test est concu pour un build isole sans
-        # les vrais ecrans — necessite soit un composant test_ui_only
-        # separe, soit rendre les vrais handlers __attribute__((weak))
-        # pour qu'ils soient surchargeables. Exclu du build pour
-        # l'instant : 6 TEST_CASE manquants jusqu'au fix.
-        # "test/test_ui_manager.c"
+        "test/test_ui_manager.c"
     )
     idf_component_register(
         SRCS ${ui_srcs}

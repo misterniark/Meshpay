@@ -25,4 +25,33 @@ menu "Mesh Pay currency (TEST options)"
 
             A laisser systematiquement OFF en production.
 
+    config MESHPAY_TEST_DEVICE_SEED
+        bool "TEST ONLY: seed each device with an idempotent self-MINT"
+        default n
+        help
+            DANGER : option de banc de test uniquement. Quand elle est active,
+            chaque device cree une fois par identifiant de campagne un MINT
+            signe par sa propre keypair vers sa propre pubkey.
+
+            L'id de campagne est stocke en NVS. Tant que l'id ne change pas,
+            le seed n'est pas rejoue au reboot. Changer l'id permet de lancer
+            une nouvelle campagne de test sans effacer toute la NVS.
+
+            Garde-fou : un #error dans main.c empeche la compilation si cette
+            option est activee en mode SECURE_FLASH_ENCRYPTION_MODE_RELEASE.
+
+    config MESHPAY_TEST_DEVICE_SEED_AMOUNT
+        int "TEST ONLY: per-device seed amount"
+        depends on MESHPAY_TEST_DEVICE_SEED
+        default 10
+        range 1 1000000
+
+    config MESHPAY_TEST_DEVICE_SEED_ID
+        string "TEST ONLY: per-device seed campaign id"
+        depends on MESHPAY_TEST_DEVICE_SEED
+        default "test-seed-v1"
+        help
+            Identifiant de campagne stocke en NVS. Changer cette valeur force
+            un nouveau seed de test sur chaque device.
+
 endmenu

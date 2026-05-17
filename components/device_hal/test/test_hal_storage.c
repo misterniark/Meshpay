@@ -14,12 +14,17 @@
 /* Instance mock partagée entre les tests */
 static hal_storage_t s_storage;
 
+static void hal_storage_test_reset(void)
+{
+    hal_storage_mock_create(&s_storage);
+}
+
 /**
  * Setup : créer un mock propre avant chaque test.
  */
 __attribute__((weak)) void setUp(void)
 {
-    hal_storage_mock_create(&s_storage);
+    hal_storage_test_reset();
 }
 
 /**
@@ -39,6 +44,8 @@ __attribute__((weak)) void tearDown(void)
  */
 TEST_CASE("storage_u32_write_read", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     uint32_t value = 0;
 
     /* Écriture */
@@ -56,6 +63,8 @@ TEST_CASE("storage_u32_write_read", "[hal_storage]")
  */
 TEST_CASE("storage_u32_read_not_found", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     uint32_t value = 42;
 
     hal_err_t err = s_storage.u32_read("config", "inexistant", &value,
@@ -68,6 +77,8 @@ TEST_CASE("storage_u32_read_not_found", "[hal_storage]")
  */
 TEST_CASE("storage_u32_overwrite", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     uint32_t value = 0;
 
     /* Première écriture */
@@ -93,6 +104,8 @@ TEST_CASE("storage_u32_overwrite", "[hal_storage]")
  */
 TEST_CASE("storage_blob_write_read", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     /* Données de test : simule un keypair de 96 octets */
     uint8_t write_buf[96];
     for (int i = 0; i < 96; i++) {
@@ -120,6 +133,8 @@ TEST_CASE("storage_blob_write_read", "[hal_storage]")
  */
 TEST_CASE("storage_blob_read_size_only", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     uint8_t data[32];
     memset(data, 0xAB, 32);
 
@@ -137,6 +152,8 @@ TEST_CASE("storage_blob_read_size_only", "[hal_storage]")
  */
 TEST_CASE("storage_blob_read_buffer_too_small", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     uint8_t data[64];
     memset(data, 0xCD, 64);
     s_storage.blob_write("test", "big", data, 64, s_storage.ctx);
@@ -157,6 +174,8 @@ TEST_CASE("storage_blob_read_buffer_too_small", "[hal_storage]")
  */
 TEST_CASE("storage_blob_read_not_found", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     uint8_t buf[32];
     size_t len = sizeof(buf);
 
@@ -174,6 +193,8 @@ TEST_CASE("storage_blob_read_not_found", "[hal_storage]")
  */
 TEST_CASE("storage_erase_existing", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     s_storage.u32_write("config", "flag", 1, s_storage.ctx);
     TEST_ASSERT_EQUAL_UINT32(1, hal_storage_mock_count(&s_storage));
 
@@ -193,6 +214,8 @@ TEST_CASE("storage_erase_existing", "[hal_storage]")
  */
 TEST_CASE("storage_erase_not_found", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     hal_err_t err = s_storage.erase("config", "ghost", s_storage.ctx);
     TEST_ASSERT_EQUAL(HAL_ERR_NOT_FOUND, err);
 }
@@ -206,6 +229,8 @@ TEST_CASE("storage_erase_not_found", "[hal_storage]")
  */
 TEST_CASE("storage_exists", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     bool found = false;
 
     /* Clé inexistante */
@@ -230,6 +255,8 @@ TEST_CASE("storage_exists", "[hal_storage]")
  */
 TEST_CASE("storage_separate_namespaces", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     /* Même clé "id" dans deux namespaces */
     s_storage.u32_write("config", "id", 100, s_storage.ctx);
     s_storage.u32_write("keys", "id", 200, s_storage.ctx);
@@ -252,6 +279,8 @@ TEST_CASE("storage_separate_namespaces", "[hal_storage]")
  */
 TEST_CASE("storage_mock_reset", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     s_storage.u32_write("a", "x", 1, s_storage.ctx);
     s_storage.u32_write("b", "y", 2, s_storage.ctx);
     TEST_ASSERT_EQUAL_UINT32(2, hal_storage_mock_count(&s_storage));
@@ -270,6 +299,8 @@ TEST_CASE("storage_mock_reset", "[hal_storage]")
  */
 TEST_CASE("storage_null_params", "[hal_storage]")
 {
+    hal_storage_test_reset();
+
     TEST_ASSERT_EQUAL(HAL_ERR_INVALID,
         s_storage.u32_write(NULL, "key", 0, s_storage.ctx));
     TEST_ASSERT_EQUAL(HAL_ERR_INVALID,

@@ -43,6 +43,9 @@ typedef enum {
     COMM_MSG_LORA_SET_ALIAS       = 0x16, /* Renommage distant d'un device par le maître */
     COMM_MSG_LORA_SET_BENEFICIARY = 0x17, /* Configuration auto-forward bénéficiaire */
     COMM_MSG_LORA_ATTESTATION     = 0x18, /* [I2-fix] Attestation signée de confirmation d'une TX */
+    COMM_MSG_LORA_DAG_SUMMARY     = 0x19, /* Phase B : résumé DAG pour rattrapage explicite */
+    COMM_MSG_LORA_DAG_REQUEST     = 0x1A, /* Phase B : demande TX depuis timestamp */
+    COMM_MSG_LORA_DAG_ATTEST_BATCH = 0x1B, /* Phase C : lot compact d'attestations */
 } comm_msg_type_t;
 
 /* Tailles maximales des messages */
@@ -79,6 +82,7 @@ typedef enum {
  */
 #define COMM_MSG_LORA_MAX     255  /* Limite radio LoRa par paquet (fragmentation au-delà) */
 #define COMM_MSG_ALIAS_MAX     32  /* Alias device max */
+#define COMM_MSG_DAG_SUMMARY_MAX_TIPS 2
 
 /* ================================================================
  * Structures de messages décodés
@@ -247,6 +251,66 @@ typedef struct {
 #define COMM_MSG_ATTESTATION_SIZE 129
 
 /**
+ * Message LORA_DAG_SUMMARY : résumé court de la fenêtre DAG locale.
+ *
+ * Format wire :
+ * [0x19][node_pubkey:32][sig:64][checkpoint_ts:8][last_tx_ts:8]
+ * [tx_count:2][tip_count:1][tip_id:32]...
+ *
+ * La signature couvre [checkpoint_ts][last_tx_ts][tx_count][tip_count][tips].
+ */
+typedef struct {
+    public_key_t node_key;
+    signature_t  signature;
+    uint64_t     checkpoint_timestamp;
+    uint64_t     last_tx_timestamp;
+    uint16_t     tx_count_window;
+    uint8_t      tip_count;
+    hash_t       tips[COMM_MSG_DAG_SUMMARY_MAX_TIPS];
+} comm_msg_dag_summary_t;
+
+#define COMM_MSG_DAG_SUMMARY_MIN_SIZE 116
+#define COMM_MSG_DAG_SUMMARY_MAX_SIZE \
+    (COMM_MSG_DAG_SUMMARY_MIN_SIZE + \
+     (COMM_MSG_DAG_SUMMARY_MAX_TIPS * CRYPTO_HASH_SIZE))
+
+/**
+ * Message LORA_DAG_REQUEST : demande explicite de rattrapage.
+ *
+ * Format wire :
+ * [0x1A][requester_pubkey:32][target_pubkey:32][sig:64]
+ * [since_timestamp:8][max_count:1]
+ *
+ * Si target_pubkey est all-zero, la demande est broadcast. Sinon seul le
+ * device cible doit répondre. La signature couvre [target][since][max].
+ */
+typedef struct {
+    public_key_t requester_key;
+    public_key_t target_key;
+    signature_t  signature;
+    uint64_t     since_timestamp;
+    uint8_t      max_count;
+} comm_msg_dag_request_t;
+
+#define COMM_MSG_DAG_REQUEST_SIZE 138
+
+#define COMM_MSG_DAG_ATTEST_BATCH_MAX 2
+#define COMM_MSG_DAG_ATTEST_BATCH_MIN_SIZE \
+    (1 + CRYPTO_PUBLIC_KEY_SIZE + 1)
+#define COMM_MSG_DAG_ATTEST_BATCH_ENTRY_SIZE \
+    (CRYPTO_SIGNATURE_SIZE + CRYPTO_HASH_SIZE)
+#define COMM_MSG_DAG_ATTEST_BATCH_MAX_SIZE \
+    (COMM_MSG_DAG_ATTEST_BATCH_MIN_SIZE + \
+     (COMM_MSG_DAG_ATTEST_BATCH_MAX * COMM_MSG_DAG_ATTEST_BATCH_ENTRY_SIZE))
+
+typedef struct {
+    public_key_t attester_key;
+    uint8_t      count;
+    signature_t  signatures[COMM_MSG_DAG_ATTEST_BATCH_MAX];
+    hash_t       tx_ids[COMM_MSG_DAG_ATTEST_BATCH_MAX];
+} comm_msg_dag_attest_batch_t;
+
+/**
  * Message LORA_SET_ALIAS : renommage distant d'un device par le maître.
  *
  * Permet au maître de changer l'alias d'un device client à distance.
@@ -380,6 +444,18 @@ int comm_msg_pack_ack(uint8_t *buf, size_t buf_len,
 int comm_msg_pack_lora_tx(uint8_t *buf, size_t buf_len,
                           const transaction_t *tx, size_t *out_len);
 
+int comm_msg_pack_dag_summary(uint8_t *buf, size_t buf_len,
+                              const comm_msg_dag_summary_t *msg,
+                              size_t *out_len);
+
+int comm_msg_pack_dag_request(uint8_t *buf, size_t buf_len,
+                              const comm_msg_dag_request_t *msg,
+                              size_t *out_len);
+
+int comm_msg_pack_dag_attest_batch(uint8_t *buf, size_t buf_len,
+                                   const comm_msg_dag_attest_batch_t *msg,
+                                   size_t *out_len);
+
 /* ================================================================
  * Fonctions d'unpacking (buffer radio → struct)
  * ================================================================ */
@@ -449,6 +525,15 @@ int comm_msg_unpack_ack(const uint8_t *buf, size_t buf_len,
  */
 int comm_msg_unpack_lora_tx(const uint8_t *buf, size_t buf_len,
                             transaction_t *tx);
+
+int comm_msg_unpack_dag_summary(const uint8_t *buf, size_t buf_len,
+                                comm_msg_dag_summary_t *msg);
+
+int comm_msg_unpack_dag_request(const uint8_t *buf, size_t buf_len,
+                                comm_msg_dag_request_t *msg);
+
+int comm_msg_unpack_dag_attest_batch(const uint8_t *buf, size_t buf_len,
+                                     comm_msg_dag_attest_batch_t *msg);
 
 /**
  * Construire un message LORA_TIME_SYNC signé dans un buffer.
@@ -699,6 +784,8 @@ int comm_msg_unpack_set_beneficiary(const uint8_t *buf, size_t buf_len,
  * @return 0 si signature valide, -1 sinon
  */
 int comm_msg_verify_broadcast(const comm_msg_broadcast_t *msg);
+int comm_msg_verify_dag_summary(const comm_msg_dag_summary_t *msg);
+int comm_msg_verify_dag_request(const comm_msg_dag_request_t *msg);
 
 /**
  * Verifier la signature Ed25519 d'un message LORA_SET_ALIAS decode.

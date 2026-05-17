@@ -57,14 +57,23 @@ void attempt_beneficiary_forward(void)
     const transaction_t *tips[2];
     uint32_t tip_count = 0;
     dag_get_tips(&s_dag, tips, 2, &tip_count);
-    if (tip_count == 0) {
-        ESP_LOGW(TAG, "Forward: pas de tips dans le DAG");
-        return;
-    }
     hash_t parents[2];
-    uint8_t parent_count = (tip_count > 2) ? 2 : (uint8_t)tip_count;
-    for (uint8_t i = 0; i < parent_count; i++) {
-        memcpy(&parents[i], &tips[i]->id, sizeof(hash_t));
+    uint8_t parent_count = 0;
+    if (tip_count == 0) {
+        if (!hash_is_zero(&s_checkpoint.last_tx_id) &&
+            s_checkpoint.timestamp > 0) {
+            memcpy(&parents[0], &s_checkpoint.last_tx_id, sizeof(hash_t));
+            parent_count = 1;
+            ESP_LOGI(TAG, "Forward: parent issu du checkpoint (DAG vide)");
+        } else {
+            ESP_LOGW(TAG, "Forward: pas de tips dans le DAG");
+            return;
+        }
+    } else {
+        parent_count = (tip_count > 2) ? 2 : (uint8_t)tip_count;
+        for (uint8_t i = 0; i < parent_count; i++) {
+            memcpy(&parents[i], &tips[i]->id, sizeof(hash_t));
+        }
     }
 
     uint64_t timestamp = get_tx_timestamp_wrapper();
@@ -110,6 +119,7 @@ void attempt_beneficiary_forward(void)
     /* [F-MN-005] La TX est CONFIRMED dès l'insertion, on libère le lock
      * immédiatement (cf. cycle confirm de lock_table). */
     (void)lock_table_confirm(&s_lock_table, &tx.id);
+    persist_runtime_checkpoint("beneficiary_forward");
 
     ESP_LOGI(TAG, "Auto-forward: %"PRIu32" credits transferes au beneficiaire",
              forward_amount);

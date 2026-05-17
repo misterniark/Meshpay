@@ -19,6 +19,7 @@
 #include "ui/ui_pin.h"
 
 #include "lvgl.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -27,6 +28,22 @@
 #include "freertos/task.h"
 
 static const char *TAG = "ui_task";
+
+#define UI_STATIC_DRAW_BUF_WIDTH 320U
+#define UI_STATIC_DRAW_BUF_ROWS  4U
+
+/*
+ * Buffer LVGL reserve statiquement en RAM interne DMA.
+ *
+ * Sur Waveshare S3 + Core1262, Wi-Fi + LoRa peuvent consommer/fragmenter
+ * le heap DMA interne avant le demarrage UI. On a observe un echec meme
+ * pour 640 octets alloues dynamiquement. En statique, le buffer est
+ * reserve au link/boot et ne depend plus de l'ordre d'initialisation des
+ * radios. 4 lignes = 320 * 4 * RGB565 = 2560 octets.
+ */
+DMA_ATTR static uint8_t s_lvgl_static_draw_buf[
+    UI_STATIC_DRAW_BUF_WIDTH * UI_STATIC_DRAW_BUF_ROWS * sizeof(lv_color16_t)
+];
 
 /* ================================================================
  * Callbacks bridge LVGL <-> HAL
@@ -296,16 +313,58 @@ void ui_task(void *pvParam)
      * echouer et laisser l'ecran noir. Un seul buffer de ~1/20 d'ecran
      * suffit pour ce petit LCD ; LVGL fera simplement plus de flushs.
      */
-    uint16_t buf_rows = ctx->screen_h / 20;
-    if (buf_rows < 4) {
-        buf_rows = 4;
+    uint16_t preferred_rows = ctx->screen_h / 20;
+    if (preferred_rows < 4) {
+        preferred_rows = 4;
     }
-    size_t buf_size = (size_t)ctx->screen_w * buf_rows * sizeof(lv_color16_t);
 
-    uint8_t *buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    uint16_t buf_rows = 0;
+    size_t buf_size = 0;
+    uint8_t *buf1 = NULL;
+
+    if (ctx->screen_w <= UI_STATIC_DRAW_BUF_WIDTH) {
+        buf_rows = preferred_rows;
+        if (buf_rows > UI_STATIC_DRAW_BUF_ROWS) {
+            buf_rows = UI_STATIC_DRAW_BUF_ROWS;
+        }
+        buf_size = (size_t)ctx->screen_w * buf_rows * sizeof(lv_color16_t);
+        buf1 = s_lvgl_static_draw_buf;
+        ESP_LOGI(TAG, "Draw buffer statique DMA utilise (%u octets, %u lignes)",
+                 buf_size, buf_rows);
+    }
+
+    uint16_t row_candidates[] = {
+        preferred_rows,
+        4,
+        2,
+        1,
+    };
+
+    for (size_t i = 0; buf1 == NULL &&
+         i < sizeof(row_candidates) / sizeof(row_candidates[0]); i++) {
+        uint16_t candidate_rows = row_candidates[i];
+        if (candidate_rows == 0 || candidate_rows > ctx->screen_h) {
+            continue;
+        }
+        if (i > 0 && candidate_rows == row_candidates[i - 1]) {
+            continue;
+        }
+
+        size_t candidate_size =
+            (size_t)ctx->screen_w * candidate_rows * sizeof(lv_color16_t);
+        buf1 = heap_caps_malloc(candidate_size,
+                                MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        if (buf1 != NULL) {
+            buf_rows = candidate_rows;
+            buf_size = candidate_size;
+            break;
+        }
+        ESP_LOGW(TAG, "Alloc draw buffer %u lignes echouee (%u octets)",
+                 candidate_rows, candidate_size);
+    }
 
     if (!buf1) {
-        ESP_LOGE(TAG, "Echec alloc draw buffer (%u octets)", buf_size);
+        ESP_LOGE(TAG, "Echec alloc draw buffer LVGL meme sur 1 ligne");
         vTaskDelete(NULL);
         return;
     }

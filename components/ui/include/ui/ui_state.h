@@ -159,6 +159,12 @@ typedef struct ui_ctx_s {
      *  apres pruning du DAG (bug I1). NULL interdit. */
     uint32_t (*get_owner_balance)(void);
 
+    /** Charge les transactions recentes persistées pour l'historique UI.
+     *  Ces TX servent uniquement a l'affichage : elles peuvent deja etre
+     *  consolidees dans le checkpoint et ne doivent pas etre recomptees
+     *  dans le solde. Retourne le nombre copie. NULL autorise. */
+    uint32_t (*load_history_txs)(transaction_t *out_txs, uint32_t max_count);
+
     /** Signale une interaction utilisateur au gestionnaire d'energie.
      *  Appele par ui_task sur chaque touch detecte. NULL autorise
      *  (le gestionnaire d'energie est optionnel selon la cible). */

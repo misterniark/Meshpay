@@ -8,6 +8,8 @@
  */
 
 #include "hal_storage_mock.h"
+#include "esp_heap_caps.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* --- Constantes internes --- */
@@ -36,8 +38,9 @@ typedef struct {
     mock_entry_t entries[MOCK_MAX_ENTRIES];
 } mock_ctx_t;
 
-/* Contexte statique — un seul mock à la fois suffit pour les tests */
-static mock_ctx_t s_mock_ctx;
+/* Contexte unique alloué sur heap/PSRAM : 64 blobs de 4 Ko ne doivent pas
+ * consommer la DRAM statique interne du binaire de test ESP32-S3. */
+static mock_ctx_t *s_mock_ctx;
 
 /* --- Fonctions utilitaires internes --- */
 
@@ -243,8 +246,18 @@ hal_err_t hal_storage_mock_create(hal_storage_t *storage)
         return HAL_ERR_INVALID;
     }
 
-    /* Réinitialiser le contexte statique */
-    memset(&s_mock_ctx, 0, sizeof(s_mock_ctx));
+    if (!s_mock_ctx) {
+        s_mock_ctx = (mock_ctx_t *)heap_caps_calloc(1, sizeof(mock_ctx_t),
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_mock_ctx) {
+            s_mock_ctx = (mock_ctx_t *)calloc(1, sizeof(mock_ctx_t));
+        }
+        if (!s_mock_ctx) {
+            return HAL_ERR_NO_MEM;
+        }
+    } else {
+        memset(s_mock_ctx, 0, sizeof(*s_mock_ctx));
+    }
 
     /* Remplir la vtable */
     storage->u32_write  = mock_u32_write;
@@ -253,7 +266,7 @@ hal_err_t hal_storage_mock_create(hal_storage_t *storage)
     storage->blob_read  = mock_blob_read;
     storage->erase      = mock_erase;
     storage->exists     = mock_exists;
-    storage->ctx        = &s_mock_ctx;
+    storage->ctx        = s_mock_ctx;
 
     return HAL_OK;
 }

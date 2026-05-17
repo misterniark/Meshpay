@@ -125,6 +125,10 @@
  * peers qui avaient encore l'historique en mémoire.
  */
 #define NVS_KEY_OWN_MAX_SEQ   "own_max_seq"
+/* Id de campagne du seed de test par device (Kconfig TEST only). */
+#define NVS_KEY_TEST_SEED_ID  "test_seed"
+/* Transaction MINT de preuve pour propager le seed de test aux peers. */
+#define NVS_KEY_TEST_SEED_TX  "test_seed_tx"
 
 /** Intervalle de verification des expirations de locks (ms). */
 #define LOCK_EXPIRE_INTERVAL_MS   5000
@@ -256,5 +260,7 @@ extern uint64_t     s_last_forward_ms;
  */
 extern checkpoint_save_fn s_checkpoint_save;
 extern checkpoint_load_fn s_checkpoint_load;
+
+bool test_device_seed_get_tx(transaction_t *out_tx);
 
 #endif /* MESHPAY_APP_STATE_H */

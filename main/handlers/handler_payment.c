@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 #include "app_state.h"  /* doit etre inclus avant freertos/queue.h */
 #include "freertos/queue.h"
@@ -19,6 +20,7 @@
 #include "dag/dag_merge.h"
 #include "dag_glue.h"
 #include "peers.h"
+#include "persistence/ledger_store.h"
 #include "time_glue.h"
 #include "transport/transport_lora.h"
 #include "wallet/wallet.h"
@@ -55,6 +57,19 @@ void handle_peer_discovered(const comm_event_t *evt)
     const uint8_t      *dest_mac = evt->data.peer.mac_addr;
 
     uint32_t sent = 0;
+#if CONFIG_MESHPAY_TEST_DEVICE_SEED
+    transaction_t seed_tx;
+    if (test_device_seed_get_tx(&seed_tx)) {
+        comm_cmd_t cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.type = COMM_CMD_SEND_TX;
+        memcpy(&cmd.data.send_tx.tx, &seed_tx, sizeof(transaction_t));
+        memcpy(cmd.data.send_tx.dest_mac, dest_mac, 6);
+        if (xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE) {
+            sent++;
+        }
+    }
+#endif
     for (uint32_t i = 0; i < s_dag.count; i++) {
         const transaction_t *tx = &s_dag.transactions[i];
         /*
@@ -65,6 +80,9 @@ void handle_peer_discovered(const comm_event_t *evt)
         if (tx->type != TX_TYPE_MINT)                       continue;
         if (!public_key_equal(&tx->from, &s_keypair.public_key)) continue;
         if (tx->status != TX_STATUS_CONFIRMED)              continue;
+#if CONFIG_MESHPAY_TEST_DEVICE_SEED
+        if (memcmp(&tx->id, &seed_tx.id, sizeof(hash_t)) == 0) continue;
+#endif
 
         comm_cmd_t cmd;
         memset(&cmd, 0, sizeof(cmd));
@@ -162,13 +180,24 @@ void handle_tx_received(const comm_event_t *evt)
     }
 
     auto_checkpoint_if_needed();
+    if (rx_tx->status == TX_STATUS_CONFIRMED) {
+        persist_runtime_checkpoint("rx_confirmed");
+    }
     ESP_LOGI(TAG, "TX recue et inseree (amount=%"PRIu32")", rx_tx->amount);
+
+    uint32_t replayed_attest = 0;
+    if (ledger_attestation_apply_to_dag(&replayed_attest) == ESP_OK &&
+        replayed_attest > 0) {
+        persist_runtime_checkpoint("attestation_replay_after_tx");
+        (void)ledger_tx_window_save_from_dag("attestation_replay_after_tx");
+    }
 
     /* TRANSFER vers nous → confirmer + ACK ESP-NOW + attestation LoRa. */
     if (rx_tx->type == TX_TYPE_TRANSFER &&
         public_key_equal(&rx_tx->to, &s_keypair.public_key)) {
 
         dag_set_status(&s_dag, &rx_tx->id, TX_STATUS_CONFIRMED);
+        persist_runtime_checkpoint("rx_to_me_confirmed");
 
         const uint8_t *dest_mac = find_peer_mac(&rx_tx->from);
         if (dest_mac != NULL) {
@@ -203,6 +232,12 @@ void handle_tx_received(const comm_event_t *evt)
                                               &s_keypair.public_key,
                                               &att_sig, &rx_tx->id,
                                               &att_len) == 0) {
+                    comm_msg_attestation_t own_att;
+                    memset(&own_att, 0, sizeof(own_att));
+                    own_att.attester_key = s_keypair.public_key;
+                    own_att.signature = att_sig;
+                    own_att.tx_id = rx_tx->id;
+                    (void)ledger_attestation_window_add(&own_att);
                     transport_lora_send(att_buf, att_len, "attestation");
                 }
             } else {
@@ -247,6 +282,7 @@ void handle_ack_received(const comm_event_t *evt)
     }
 
     dag_set_status(&s_dag, tx_id, TX_STATUS_CONFIRMED);
+    persist_runtime_checkpoint("ack_confirmed");
     ESP_LOGI(TAG, "TX confirmee (ACK recu et verifie)");
 }
 
@@ -255,6 +291,7 @@ void handle_tx_timeout(const comm_event_t *evt)
     const hash_t *tx_id = &evt->data.tx_id;
     lock_table_cancel(&s_lock_table, tx_id);
     dag_set_status(&s_dag, tx_id, TX_STATUS_CANCELLED);
+    persist_runtime_checkpoint("tx_timeout");
     ESP_LOGW(TAG, "TX annulee (timeout)");
 }
 
@@ -262,9 +299,13 @@ void handle_attestation_received(const comm_event_t *evt)
 {
     const comm_msg_attestation_t *att = &evt->data.attestation;
 
+    if (ledger_attestation_window_add(att) != ESP_OK) {
+        ESP_LOGW(TAG, "Attestation non persistée");
+    }
+
     const transaction_t *tx = dag_get_by_id(&s_dag, &att->tx_id);
     if (tx == NULL) {
-        ESP_LOGD(TAG, "Attestation reçue pour TX inconnue — ignorée");
+        ESP_LOGD(TAG, "Attestation recue pour TX inconnue, conservee pour replay");
         return;
     }
     if (tx->status == TX_STATUS_CONFIRMED) {
@@ -297,6 +338,8 @@ void handle_attestation_received(const comm_event_t *evt)
     }
 
     dag_set_status(&s_dag, &att->tx_id, TX_STATUS_CONFIRMED);
+    persist_runtime_checkpoint("attestation_confirmed");
+    (void)ledger_tx_window_save_from_dag("attestation_confirmed");
     ESP_LOGI(TAG, "TX confirmée par attestation LoRa (amount=%"PRIu32")",
              tx->amount);
 }

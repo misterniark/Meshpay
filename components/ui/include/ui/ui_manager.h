@@ -80,4 +80,13 @@ ui_screen_id_t ui_manager_current(void);
  */
 int ui_manager_nav_depth(void);
 
+/**
+ * Remplacer un handler d'ecran.
+ *
+ * API d'instrumentation pour test_app : permet de tester la navigation
+ * avec des handlers fictifs sans linker des doubles des vrais ecrans.
+ */
+bool ui_manager_set_handler_for_test(ui_screen_id_t screen_id,
+                                     ui_screen_handler_t *handler);
+
 #endif /* UI_MANAGER_H */

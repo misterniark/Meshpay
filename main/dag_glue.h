@@ -35,6 +35,7 @@ extern "C" {
 
 esp_err_t dag_insert_and_track(const transaction_t *tx);
 void      auto_checkpoint_if_needed(void);
+esp_err_t persist_runtime_checkpoint(const char *reason);
 
 #ifdef __cplusplus
 }

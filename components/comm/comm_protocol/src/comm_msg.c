@@ -233,6 +233,9 @@ int comm_msg_get_type(const uint8_t *buf, size_t buf_len,
         case COMM_MSG_LORA_SET_ALIAS:
         case COMM_MSG_LORA_SET_BENEFICIARY:
         case COMM_MSG_LORA_ATTESTATION: /* [Lot E.1bis] case oublie depuis l'ajout I2-fix */
+        case COMM_MSG_LORA_DAG_SUMMARY:
+        case COMM_MSG_LORA_DAG_REQUEST:
+        case COMM_MSG_LORA_DAG_ATTEST_BATCH:
             *type = (comm_msg_type_t)t;
             return 0;
         default:
@@ -351,6 +354,201 @@ int comm_msg_unpack_lora_tx(const uint8_t *buf, size_t buf_len,
 
     esp_err_t err = tx_deserialize(&buf[1], buf_len - 1, tx);
     return (err == ESP_OK) ? 0 : -1;
+}
+
+/* ================================================================
+ * LORA_DAG_SUMMARY / LORA_DAG_REQUEST — Phase B
+ * ================================================================ */
+
+int comm_msg_pack_dag_summary(uint8_t *buf, size_t buf_len,
+                              const comm_msg_dag_summary_t *msg,
+                              size_t *out_len)
+{
+    if (!buf || !msg || !out_len ||
+        msg->tip_count > COMM_MSG_DAG_SUMMARY_MAX_TIPS) {
+        return -1;
+    }
+
+    size_t total = COMM_MSG_DAG_SUMMARY_MIN_SIZE +
+                   ((size_t)msg->tip_count * CRYPTO_HASH_SIZE);
+    if (buf_len < total) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    buf[offset++] = COMM_MSG_LORA_DAG_SUMMARY;
+    memcpy(&buf[offset], msg->node_key.bytes, CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+    memcpy(&buf[offset], msg->signature.bytes, CRYPTO_SIGNATURE_SIZE);
+    offset += CRYPTO_SIGNATURE_SIZE;
+    write_u64_be(&buf[offset], msg->checkpoint_timestamp);
+    offset += 8;
+    write_u64_be(&buf[offset], msg->last_tx_timestamp);
+    offset += 8;
+    write_u16_be(&buf[offset], msg->tx_count_window);
+    offset += 2;
+    buf[offset++] = msg->tip_count;
+    for (uint8_t i = 0; i < msg->tip_count; i++) {
+        memcpy(&buf[offset], msg->tips[i].bytes, CRYPTO_HASH_SIZE);
+        offset += CRYPTO_HASH_SIZE;
+    }
+
+    *out_len = offset;
+    return 0;
+}
+
+int comm_msg_unpack_dag_summary(const uint8_t *buf, size_t buf_len,
+                                comm_msg_dag_summary_t *msg)
+{
+    if (!buf || !msg || buf_len < COMM_MSG_DAG_SUMMARY_MIN_SIZE ||
+        buf[0] != COMM_MSG_LORA_DAG_SUMMARY) {
+        return -1;
+    }
+
+    memset(msg, 0, sizeof(*msg));
+    size_t offset = 1;
+    memcpy(msg->node_key.bytes, &buf[offset], CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+    memcpy(msg->signature.bytes, &buf[offset], CRYPTO_SIGNATURE_SIZE);
+    offset += CRYPTO_SIGNATURE_SIZE;
+    msg->checkpoint_timestamp = read_u64_be(&buf[offset]);
+    offset += 8;
+    msg->last_tx_timestamp = read_u64_be(&buf[offset]);
+    offset += 8;
+    msg->tx_count_window = read_u16_be(&buf[offset]);
+    offset += 2;
+    msg->tip_count = buf[offset++];
+
+    if (msg->tip_count > COMM_MSG_DAG_SUMMARY_MAX_TIPS) {
+        return -1;
+    }
+    size_t expected = COMM_MSG_DAG_SUMMARY_MIN_SIZE +
+                      ((size_t)msg->tip_count * CRYPTO_HASH_SIZE);
+    if (buf_len < expected) {
+        return -1;
+    }
+
+    for (uint8_t i = 0; i < msg->tip_count; i++) {
+        memcpy(msg->tips[i].bytes, &buf[offset], CRYPTO_HASH_SIZE);
+        offset += CRYPTO_HASH_SIZE;
+    }
+
+    return 0;
+}
+
+int comm_msg_pack_dag_request(uint8_t *buf, size_t buf_len,
+                              const comm_msg_dag_request_t *msg,
+                              size_t *out_len)
+{
+    if (!buf || !msg || !out_len || buf_len < COMM_MSG_DAG_REQUEST_SIZE ||
+        msg->max_count == 0) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    buf[offset++] = COMM_MSG_LORA_DAG_REQUEST;
+    memcpy(&buf[offset], msg->requester_key.bytes, CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+    memcpy(&buf[offset], msg->target_key.bytes, CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+    memcpy(&buf[offset], msg->signature.bytes, CRYPTO_SIGNATURE_SIZE);
+    offset += CRYPTO_SIGNATURE_SIZE;
+    write_u64_be(&buf[offset], msg->since_timestamp);
+    offset += 8;
+    buf[offset++] = msg->max_count;
+
+    *out_len = offset;
+    return 0;
+}
+
+int comm_msg_unpack_dag_request(const uint8_t *buf, size_t buf_len,
+                                comm_msg_dag_request_t *msg)
+{
+    if (!buf || !msg || buf_len < COMM_MSG_DAG_REQUEST_SIZE ||
+        buf[0] != COMM_MSG_LORA_DAG_REQUEST) {
+        return -1;
+    }
+
+    memset(msg, 0, sizeof(*msg));
+    size_t offset = 1;
+    memcpy(msg->requester_key.bytes, &buf[offset], CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+    memcpy(msg->target_key.bytes, &buf[offset], CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+    memcpy(msg->signature.bytes, &buf[offset], CRYPTO_SIGNATURE_SIZE);
+    offset += CRYPTO_SIGNATURE_SIZE;
+    msg->since_timestamp = read_u64_be(&buf[offset]);
+    offset += 8;
+    msg->max_count = buf[offset++];
+
+    return (msg->max_count > 0) ? 0 : -1;
+}
+
+int comm_msg_pack_dag_attest_batch(uint8_t *buf, size_t buf_len,
+                                   const comm_msg_dag_attest_batch_t *msg,
+                                   size_t *out_len)
+{
+    if (!buf || !msg || !out_len ||
+        msg->count == 0 ||
+        msg->count > COMM_MSG_DAG_ATTEST_BATCH_MAX) {
+        return -1;
+    }
+
+    size_t total = COMM_MSG_DAG_ATTEST_BATCH_MIN_SIZE +
+                   ((size_t)msg->count * COMM_MSG_DAG_ATTEST_BATCH_ENTRY_SIZE);
+    if (buf_len < total || total > COMM_MSG_LORA_MAX) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    buf[offset++] = COMM_MSG_LORA_DAG_ATTEST_BATCH;
+    memcpy(&buf[offset], msg->attester_key.bytes, CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+    buf[offset++] = msg->count;
+    for (uint8_t i = 0; i < msg->count; i++) {
+        memcpy(&buf[offset], msg->signatures[i].bytes, CRYPTO_SIGNATURE_SIZE);
+        offset += CRYPTO_SIGNATURE_SIZE;
+        memcpy(&buf[offset], msg->tx_ids[i].bytes, CRYPTO_HASH_SIZE);
+        offset += CRYPTO_HASH_SIZE;
+    }
+
+    *out_len = offset;
+    return 0;
+}
+
+int comm_msg_unpack_dag_attest_batch(const uint8_t *buf, size_t buf_len,
+                                     comm_msg_dag_attest_batch_t *msg)
+{
+    if (!buf || !msg ||
+        buf_len < COMM_MSG_DAG_ATTEST_BATCH_MIN_SIZE ||
+        buf[0] != COMM_MSG_LORA_DAG_ATTEST_BATCH) {
+        return -1;
+    }
+
+    memset(msg, 0, sizeof(*msg));
+    size_t offset = 1;
+    memcpy(msg->attester_key.bytes, &buf[offset], CRYPTO_PUBLIC_KEY_SIZE);
+    offset += CRYPTO_PUBLIC_KEY_SIZE;
+    msg->count = buf[offset++];
+    if (msg->count == 0 ||
+        msg->count > COMM_MSG_DAG_ATTEST_BATCH_MAX) {
+        return -1;
+    }
+
+    size_t expected = COMM_MSG_DAG_ATTEST_BATCH_MIN_SIZE +
+                      ((size_t)msg->count * COMM_MSG_DAG_ATTEST_BATCH_ENTRY_SIZE);
+    if (buf_len < expected) {
+        return -1;
+    }
+
+    for (uint8_t i = 0; i < msg->count; i++) {
+        memcpy(msg->signatures[i].bytes, &buf[offset], CRYPTO_SIGNATURE_SIZE);
+        offset += CRYPTO_SIGNATURE_SIZE;
+        memcpy(msg->tx_ids[i].bytes, &buf[offset], CRYPTO_HASH_SIZE);
+        offset += CRYPTO_HASH_SIZE;
+    }
+
+    return 0;
 }
 
 /* ================================================================
@@ -955,6 +1153,52 @@ int comm_msg_verify_broadcast(const comm_msg_broadcast_t *msg)
 
     esp_err_t err = crypto_verify(signed_buf, 1 + msg->text_len,
                                    &msg->sender_key, &msg->signature);
+    return (err == ESP_OK) ? 0 : -1;
+}
+
+int comm_msg_verify_dag_summary(const comm_msg_dag_summary_t *msg)
+{
+    if (!msg || msg->tip_count > COMM_MSG_DAG_SUMMARY_MAX_TIPS) {
+        return -1;
+    }
+
+    uint8_t signed_buf[8 + 8 + 2 + 1 +
+                       (COMM_MSG_DAG_SUMMARY_MAX_TIPS * CRYPTO_HASH_SIZE)];
+    size_t signed_len = 0;
+    write_u64_be(&signed_buf[signed_len], msg->checkpoint_timestamp);
+    signed_len += 8;
+    write_u64_be(&signed_buf[signed_len], msg->last_tx_timestamp);
+    signed_len += 8;
+    write_u16_be(&signed_buf[signed_len], msg->tx_count_window);
+    signed_len += 2;
+    signed_buf[signed_len++] = msg->tip_count;
+    for (uint8_t i = 0; i < msg->tip_count; i++) {
+        memcpy(&signed_buf[signed_len], msg->tips[i].bytes, CRYPTO_HASH_SIZE);
+        signed_len += CRYPTO_HASH_SIZE;
+    }
+
+    esp_err_t err = crypto_verify(signed_buf, signed_len,
+                                  &msg->node_key, &msg->signature);
+    return (err == ESP_OK) ? 0 : -1;
+}
+
+int comm_msg_verify_dag_request(const comm_msg_dag_request_t *msg)
+{
+    if (!msg || msg->max_count == 0) {
+        return -1;
+    }
+
+    uint8_t signed_buf[CRYPTO_PUBLIC_KEY_SIZE + 8 + 1];
+    size_t signed_len = 0;
+    memcpy(&signed_buf[signed_len], msg->target_key.bytes,
+           CRYPTO_PUBLIC_KEY_SIZE);
+    signed_len += CRYPTO_PUBLIC_KEY_SIZE;
+    write_u64_be(&signed_buf[signed_len], msg->since_timestamp);
+    signed_len += 8;
+    signed_buf[signed_len++] = msg->max_count;
+
+    esp_err_t err = crypto_verify(signed_buf, signed_len,
+                                  &msg->requester_key, &msg->signature);
     return (err == ESP_OK) ? 0 : -1;
 }
 

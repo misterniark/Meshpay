@@ -11,6 +11,7 @@
 #include "wallet/wallet_lock.h"
 #include "wallet/wallet_checkpoint.h"
 #include "dag/dag.h"
+#include "dag/dag_prune.h"
 #include "transaction/tx_create.h"
 #include "crypto/crypto_keys.h"
 #include "currency/currency_config.h"
@@ -1108,9 +1109,7 @@ TEST_CASE("melt_desactive_pas_de_reduction", "[wallet]")
  * Scenario :
  * 1. Creer un checkpoint de base avec last_melt_timestamp global = 42000
  * 2. Creer un checkpoint incremental (DAG vide)
- * 3. Verifier que le timestamp global n'est pas dans le nouveau checkpoint
- *    (c'est main.c qui le recopie, pas checkpoint_create)
- *    mais que la structure checkpoint_t possede bien le champ.
+ * 3. Verifier que checkpoint_create propage le timestamp global depuis base.
  */
 TEST_CASE("checkpoint_preserves_melt_timestamp", "[wallet]")
 {
@@ -1136,12 +1135,7 @@ TEST_CASE("checkpoint_preserves_melt_timestamp", "[wallet]")
     TEST_ASSERT_EQUAL(1, chk.account_count);
     TEST_ASSERT_EQUAL(500, chk.accounts[0].balance);
 
-    /*
-     * checkpoint_create ne copie pas last_melt_timestamp (c'est main.c
-     * qui le fait lors du checkpoint automatique). Apres memset(0),
-     * le champ est a 0 dans le nouveau checkpoint.
-     */
-    TEST_ASSERT_EQUAL(0, chk.last_melt_timestamp);
+    TEST_ASSERT_EQUAL_UINT64(42000, chk.last_melt_timestamp);
 }
 
 /**
@@ -1683,6 +1677,181 @@ TEST_CASE("melt_enchaine_transactions_et_fonte", "[wallet][melt]")
     free(dag2);
     free(chk0);
     free(chk1);
+}
+
+/* ========================================================================= */
+/*    Tests convergence checkpoint + DAG pruné (Phase D)                     */
+/* ========================================================================= */
+
+/**
+ * @brief La DAG complète et checkpoint + DAG pruné doivent donner les mêmes soldes.
+ *
+ * Scénario :
+ * - Mint confirmé vers Alice.
+ * - Deux transferts confirmés avant checkpoint.
+ * - Un transfert LOCKED après checkpoint.
+ *
+ * Après prune, les TX confirmées couvertes par le checkpoint disparaissent,
+ * mais le transfert LOCKED reste dans la DAG récente. Les soldes calculés
+ * doivent converger avec ceux de la DAG complète.
+ */
+TEST_CASE("convergence_checkpoint_prune_garde_solde_dag_complete", "[wallet][checkpoint][convergence]")
+{
+    dag_t *full = malloc(sizeof(dag_t));
+    dag_t *pruned = malloc(sizeof(dag_t));
+    checkpoint_t *checkpoint = malloc(sizeof(checkpoint_t));
+    TEST_ASSERT_NOT_NULL(full);
+    TEST_ASSERT_NOT_NULL(pruned);
+    TEST_ASSERT_NOT_NULL(checkpoint);
+    dag_init(full);
+
+    keypair_t master, alice, bob;
+    crypto_generate_keypair(&master);
+    crypto_generate_keypair(&alice);
+    crypto_generate_keypair(&bob);
+
+    hash_t genesis;
+    make_hash(&genesis, 0xD1);
+
+    transaction_t mint;
+    tx_create_mint(&mint, &master, &alice.public_key, 500, 0, 0,
+                   &genesis, 1, 1000);
+    dag_insert(full, &mint);
+
+    transaction_t alice_to_bob;
+    tx_create_transfer(&alice_to_bob, &alice, &bob.public_key,
+                       120, 0, 0, 1, &mint.id, 1, 2000);
+    alice_to_bob.status = TX_STATUS_CONFIRMED;
+    dag_insert(full, &alice_to_bob);
+
+    transaction_t bob_to_alice;
+    tx_create_transfer(&bob_to_alice, &bob, &alice.public_key,
+                       30, 0, 0, 1, &alice_to_bob.id, 1, 3000);
+    bob_to_alice.status = TX_STATUS_CONFIRMED;
+    dag_insert(full, &bob_to_alice);
+
+    transaction_t locked;
+    tx_create_transfer(&locked, &alice, &bob.public_key,
+                       40, 0, 0, 2, &bob_to_alice.id, 1, 4000);
+    dag_insert(full, &locked);
+
+    uint32_t full_alice = 0;
+    uint32_t full_bob = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(full, NULL, &alice.public_key, NULL, &full_alice));
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(full, NULL, &bob.public_key, NULL, &full_bob));
+    TEST_ASSERT_EQUAL_UINT32(370, full_alice);
+    TEST_ASSERT_EQUAL_UINT32(90, full_bob);
+
+    TEST_ASSERT_EQUAL(ESP_OK, checkpoint_create(full, NULL, NULL, checkpoint));
+    TEST_ASSERT_EQUAL_UINT64(3000, checkpoint->timestamp);
+
+    dag_init(pruned);
+    dag_insert(pruned, &mint);
+    dag_insert(pruned, &alice_to_bob);
+    dag_insert(pruned, &bob_to_alice);
+    dag_insert(pruned, &locked);
+    TEST_ASSERT_EQUAL(ESP_OK, dag_prune_before(pruned, checkpoint->timestamp));
+
+    TEST_ASSERT_EQUAL_UINT32(1, dag_count(pruned));
+    TEST_ASSERT_TRUE(hash_equal(&pruned->transactions[0].id, &locked.id));
+
+    uint32_t pruned_alice = 0;
+    uint32_t pruned_bob = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(pruned, checkpoint, &alice.public_key, NULL, &pruned_alice));
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(pruned, checkpoint, &bob.public_key, NULL, &pruned_bob));
+    TEST_ASSERT_EQUAL_UINT32(full_alice, pruned_alice);
+    TEST_ASSERT_EQUAL_UINT32(full_bob, pruned_bob);
+
+    free(full);
+    free(pruned);
+    free(checkpoint);
+}
+
+/**
+ * @brief Les frais convergent aussi après checkpoint + prune.
+ *
+ * Le compte fee_recipient doit obtenir le même solde depuis la DAG complète
+ * ou depuis le checkpoint seul après purge des TX confirmées.
+ */
+TEST_CASE("convergence_checkpoint_prune_conserve_frais", "[wallet][checkpoint][convergence]")
+{
+    dag_t *full = malloc(sizeof(dag_t));
+    dag_t *pruned = malloc(sizeof(dag_t));
+    checkpoint_t *checkpoint = malloc(sizeof(checkpoint_t));
+    TEST_ASSERT_NOT_NULL(full);
+    TEST_ASSERT_NOT_NULL(pruned);
+    TEST_ASSERT_NOT_NULL(checkpoint);
+    dag_init(full);
+
+    keypair_t master, alice, bob, fees;
+    crypto_generate_keypair(&master);
+    crypto_generate_keypair(&alice);
+    crypto_generate_keypair(&bob);
+    crypto_generate_keypair(&fees);
+
+    hash_t genesis;
+    make_hash(&genesis, 0xD2);
+
+    transaction_t mint;
+    tx_create_mint(&mint, &master, &alice.public_key, 1000, 0, 0,
+                   &genesis, 1, 1000);
+    dag_insert(full, &mint);
+
+    transaction_t pay;
+    tx_create_transfer(&pay, &alice, &bob.public_key,
+                       100, 0, 7, 1, &mint.id, 1, 2000);
+    pay.status = TX_STATUS_CONFIRMED;
+    dag_insert(full, &pay);
+
+    uint32_t full_alice = 0;
+    uint32_t full_bob = 0;
+    uint32_t full_fees = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(full, NULL, &alice.public_key,
+                               &fees.public_key, &full_alice));
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(full, NULL, &bob.public_key,
+                               &fees.public_key, &full_bob));
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(full, NULL, &fees.public_key,
+                               &fees.public_key, &full_fees));
+    TEST_ASSERT_EQUAL_UINT32(893, full_alice);
+    TEST_ASSERT_EQUAL_UINT32(100, full_bob);
+    TEST_ASSERT_EQUAL_UINT32(7, full_fees);
+
+    TEST_ASSERT_EQUAL(ESP_OK,
+        checkpoint_create(full, NULL, &fees.public_key, checkpoint));
+
+    dag_init(pruned);
+    dag_insert(pruned, &mint);
+    dag_insert(pruned, &pay);
+    TEST_ASSERT_EQUAL(ESP_OK, dag_prune_before(pruned, checkpoint->timestamp));
+    TEST_ASSERT_EQUAL_UINT32(0, dag_count(pruned));
+
+    uint32_t pruned_alice = 0;
+    uint32_t pruned_bob = 0;
+    uint32_t pruned_fees = 0;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(pruned, checkpoint, &alice.public_key,
+                               &fees.public_key, &pruned_alice));
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(pruned, checkpoint, &bob.public_key,
+                               &fees.public_key, &pruned_bob));
+    TEST_ASSERT_EQUAL(ESP_OK,
+        wallet_get_balance_for(pruned, checkpoint, &fees.public_key,
+                               &fees.public_key, &pruned_fees));
+
+    TEST_ASSERT_EQUAL_UINT32(full_alice, pruned_alice);
+    TEST_ASSERT_EQUAL_UINT32(full_bob, pruned_bob);
+    TEST_ASSERT_EQUAL_UINT32(full_fees, pruned_fees);
+
+    free(full);
+    free(pruned);
+    free(checkpoint);
 }
 
 /* ========================================================================= */

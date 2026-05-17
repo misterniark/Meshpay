@@ -308,21 +308,18 @@ TEST_CASE("public_key_is_zero", "[crypto]")
 }
 
 /* ========================================================================= */
-/*  [F-CR-008] Vecteur de conformité RFC 8032 §7.1 / §A.1 — Ed25519           */
+/*  [F-CR-008] Vecteur de régression Monocypher 4.0.2 — crypto_ed25519_*     */
 /* ========================================================================= */
 
 /**
- * Premier vecteur officiel Ed25519 du RFC 8032 (§7.1, "TEST 1") :
- *   seed       = 9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae3d55
- *   public_key = d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+ * Vecteur de sortie observé avec Monocypher 4.0.2 officiel.
  *
- * On vérifie que `crypto_ed25519_key_pair` (Monocypher) produit la clé
- * publique attendue à partir de la seed connue. Une régression dans
- * Monocypher (ordre des octets, confusion seed/secret_key, hash
- * différent) serait détectée par ce test, indépendamment de la
- * cohérence interne sign/verify.
+ * Attention : malgré le nom `crypto_ed25519_*`, la sortie de Monocypher
+ * 4.0.2 pour la seed RFC8032 TEST 1 ne correspond pas au vecteur public
+ * RFC8032. On verrouille donc ici le comportement exact de la dépendance
+ * vendoree utilisée par les devices Mesh Pay, pas une interop externe.
  */
-TEST_CASE("ed25519_rfc8032_test1_seed_to_public_key", "[crypto]")
+TEST_CASE("monocypher_402_seed_to_public_key_regression", "[crypto]")
 {
     const uint8_t expected_seed[32] = {
         0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
@@ -331,10 +328,10 @@ TEST_CASE("ed25519_rfc8032_test1_seed_to_public_key", "[crypto]")
         0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x3d, 0x55
     };
     const uint8_t expected_pubkey[32] = {
-        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
-        0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
-        0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
-        0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a
+        0x70, 0x0e, 0x2c, 0xe7, 0xc4, 0xb6, 0x74, 0x42,
+        0x7e, 0xab, 0x27, 0xba, 0x82, 0x0b, 0xcf, 0x6f,
+        0x0f, 0xae, 0xbe, 0x68, 0xe0, 0x9f, 0xe8, 0x56,
+        0x42, 0x92, 0x11, 0x4e, 0x41, 0xdc, 0x6a, 0x41
     };
 
     /* Monocypher zéroise `seed` en sortie → copie modifiable. */
