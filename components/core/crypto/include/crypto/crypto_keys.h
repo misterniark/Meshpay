@@ -1,11 +1,12 @@
 /**
  * @file crypto_keys.h
- * @brief Gestion des paires de clés Ed25519.
+ * @brief Gestion des paires de clés du profil crypto Mesh Pay.
  *
  * Fournit les fonctions pour générer, exporter et importer des paires
- * de clés Ed25519. Depuis le Lot E.2, l'implémentation utilise Monocypher
- * (vendoré) pour l'API `crypto_ed25519_*`, et
- * `esp_fill_random()` (TRNG matériel ESP32) pour la source d'entropie.
+ * de clés Mesh Pay. Depuis le Lot E.2, l'implémentation utilise Monocypher
+ * 4.0.2 vendoré pour l'API `crypto_ed25519_*`, et `esp_fill_random()`
+ * (TRNG matériel ESP32) pour la source d'entropie. Ce profil est fermé
+ * Mesh Pay ; voir crypto_profile.h pour la décision d'interop.
  */
 
 #ifndef CRYPTO_KEYS_H
@@ -16,7 +17,7 @@
 #include <stddef.h>
 
 /**
- * @brief Génère une nouvelle paire de clés Ed25519.
+ * @brief Génère une nouvelle paire de clés Mesh Pay.
  *
  * Utilise `esp_fill_random()` (TRNG matériel ESP32) pour générer la seed,
  * puis dérive la paire (seed||public, public) via Monocypher

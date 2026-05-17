@@ -1,6 +1,6 @@
 /**
  * @file crypto_sign.c
- * @brief Implémentation de la signature et vérification Ed25519 via Monocypher.
+ * @brief Implémentation de la signature Mesh Pay via Monocypher.
  *
  * Depuis le Lot E.2 (mai 2026) : remplace l'ancienne implémentation
  * basée sur PSA Crypto de mbedTLS (`PSA_ALG_PURE_EDDSA`), qui retournait
@@ -8,8 +8,10 @@
  * ne fournit aucun driver Ed25519.
  *
  * Monocypher (vendoré dans `vendor/monocypher/`) fournit l'API
- * `crypto_ed25519_*` sans dépendance externe. La signature reste sur le
- * fil exactement la même (64 octets) : aucun impact sur le format wire.
+ * `crypto_ed25519_*` sans dépendance externe. Suite à la vérification du
+ * 2026-05-17, ce profil est explicitement traité comme un format fermé
+ * Mesh Pay / Monocypher 4.0.2, pas comme une promesse d'interop RFC8032.
+ * La signature reste sur le fil exactement la même (64 octets).
  *
  * L'initialisation `crypto_init()` reste appelée au démarrage et le flag
  * `crypto_is_initialized()` reste consulté ici, pour conserver l'invariant

@@ -22,6 +22,18 @@
 
 static const char *TAG = "dag_merge";
 
+static int hash_compare_lex(const hash_t *a, const hash_t *b)
+{
+    return memcmp(a->bytes, b->bytes, CRYPTO_HASH_SIZE);
+}
+
+static bool same_seq_scope(const transaction_t *a, const transaction_t *b)
+{
+    return a != NULL && b != NULL &&
+           a->seq == b->seq &&
+           public_key_equal(&a->from, &b->from);
+}
+
 esp_err_t dag_merge_transaction(dag_t *dag, const transaction_t *tx,
                                 const master_keys_t *master_keys,
                                 dag_merge_result_t *result)
@@ -115,29 +127,61 @@ esp_err_t dag_merge_transaction(dag_t *dag, const transaction_t *tx,
     }
 
     /*
-     * [I3-fix] Detection de conflits par nonce monotone.
+     * Convergence long terme : resolution deterministe des conflits
+     * (from, seq).
      *
-     * Si le DAG contient deja une TX avec meme (from, seq) mais un id
-     * different, c'est une double-depense de l'emetteur : il a tente
-     * d'emettre deux TX distinctes avec le meme numero de sequence.
-     *
-     * On rejette la nouvelle TX (la plus ancienne prevaut par ordre
-     * d'arrivee dans le DAG). L'emetteur est donc incite a maintenir
-     * un compteur strict.
-     *
-     * Les MINT et TRANSFER partagent le meme espace de seq par emetteur.
-     * Le seq=0 est tolere UNIQUEMENT pour la premiere TX d'un emetteur
-     * (genesis MINT notamment). Au-dela, chaque TX d'un meme from doit
-     * avoir un seq unique.
+     * L'ancien modele etait "first seen wins" : deux devices recevant
+     * deux branches valides dans des ordres differents pouvaient garder
+     * des gagnants differents indefiniment. On utilise maintenant un
+     * ordre canonique stable sur tx_id : pour un meme emetteur et un
+     * meme seq, la TX dont le hash est lexicographiquement le plus petit
+     * gagne. Les perdantes restent dans le DAG avec status CANCELLED pour
+     * audit, dedup et propagation, mais le wallet ne les comptabilise pas.
      */
+    bool has_conflict = false;
+    bool incoming_wins = true;
     for (uint32_t i = 0; i < dag->count; i++) {
-        const transaction_t *existing = &dag->transactions[i];
-        if (existing->seq == tx->seq &&
-            public_key_equal(&existing->from, &tx->from)) {
-            *result = DAG_MERGE_CONFLICT;
-            xSemaphoreGiveRecursive(dag->mutex);
-            return ESP_OK;
+        transaction_t *existing = &dag->transactions[i];
+        if (!same_seq_scope(existing, tx) ||
+            hash_equal(&existing->id, &tx->id)) {
+            continue;
         }
+
+        has_conflict = true;
+        if (hash_compare_lex(&existing->id, &tx->id) < 0) {
+            incoming_wins = false;
+        }
+    }
+
+    if (has_conflict) {
+        if (dag->count >= DAG_MAX_TRANSACTIONS) {
+            *result = DAG_MERGE_REJECTED;
+            xSemaphoreGiveRecursive(dag->mutex);
+            return ESP_ERR_NO_MEM;
+        }
+
+        transaction_t stored;
+        memcpy(&stored, tx, sizeof(stored));
+
+        if (incoming_wins) {
+            for (uint32_t i = 0; i < dag->count; i++) {
+                transaction_t *existing = &dag->transactions[i];
+                if (same_seq_scope(existing, &stored) &&
+                    !hash_equal(&existing->id, &stored.id)) {
+                    existing->status = TX_STATUS_CANCELLED;
+                }
+            }
+        } else {
+            stored.status = TX_STATUS_CANCELLED;
+        }
+
+        assert(dag->count < DAG_MAX_TRANSACTIONS);
+        memcpy(&dag->transactions[dag->count], &stored, sizeof(stored));
+        dag->count++;
+
+        *result = DAG_MERGE_CONFLICT;
+        xSemaphoreGiveRecursive(dag->mutex);
+        return ESP_OK;
     }
 
     /* Si le DAG est plein → rejeté */

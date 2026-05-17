@@ -171,7 +171,7 @@ Quand Alice envoie 50 credits a Bob, la transaction est signee avec la cle prive
 
   
 
-MeshPay utilise l'algorithme **Ed25519**, un standard de cryptographie moderne reconnu pour sa rapidité et sa securite.
+Le prototype actuel utilise un **profil de signature Mesh Pay** base sur Monocypher 4.0.2. Il est coherent entre devices MeshPay homogenes, mais il n'est pas annonce comme interoperable Ed25519/RFC8032 avec des stacks externes.
 
   
 
@@ -354,7 +354,7 @@ L'interface s'adapte automatiquement a la taille de l'ecran : pave numerique com
 
 | **Vitesse de paiement** | < 1 seconde |
 
-| **Securite** | Signatures Ed25519, chiffrement AES-256, PIN protege |
+| **Securite** | Signatures Mesh Pay, chiffrement AES-256, PIN protege |
 
 | **Monnaie** | Configurable (nom, plafond, frais, fonte, expiration) |
 

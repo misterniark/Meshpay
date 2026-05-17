@@ -48,16 +48,18 @@ typedef uint64_t (*lora_get_time_fn)(void);
  *
  * L'implementation doit :
  *   1. Acquerir tout verrou applicatif necessaire (mutex DAG, etc.).
- *   2. Parcourir le DAG et copier dans out_buf les TX CONFIRMED dont
- *      le timestamp est strictement superieur a since_ts, jusqu'a
- *      max_count entrees.
- *   3. Renseigner *out_newest_ts avec le plus grand timestamp copie
+ *   2. Parcourir le DAG / la fenetre durable et copier dans out_buf la
+ *      page deterministe des plus anciennes TX CONFIRMED dont le
+ *      timestamp est strictement superieur a since_ts, jusqu'a max_count
+ *      entrees. L'ordre attendu est timestamp croissant, puis tx_id.
+ *   3. Renseigner *out_newest_ts avec le timestamp de fin de page
  *      (ou since_ts si rien n'a ete copie).
  *   4. Liberer le verrou.
  *   5. Retourner le nombre de TX copiees.
  *
  * Important : la fonction doit etre rapide (sous verrou applicatif).
- * Pas d'I/O reseau ni d'allocation dynamique a l'interieur.
+ * Pas d'I/O reseau sous verrou applicatif. Les doublons sont autorises :
+ * le protocole LoRa les traite comme idempotents et le merge DAG dedupe.
  *
  * @param since_ts       Ne copier que les TX avec timestamp > since_ts
  * @param out_buf        Buffer de sortie (capacite max_count entrees)

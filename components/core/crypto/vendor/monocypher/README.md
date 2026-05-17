@@ -20,6 +20,18 @@ de driver Ed25519 dans IDF v5.4.3 (`PSA_ERROR_NOT_SUPPORTED`).
 | `monocypher-ed25519.c` / `monocypher-ed25519.h` | API `crypto_ed25519_*` Monocypher — c'est ce qu'utilise Mesh Pay |
 | `LICENSE.md` | Texte CC-0 + BSD-2 |
 
+## Decision Mesh Pay 2026-05-17
+
+Le firmware expose ce choix sous forme de profil dans
+`components/core/crypto/include/crypto/crypto_profile.h` :
+
+- `CRYPTO_SIGNATURE_WIRE_VERSION = 1`
+- `CRYPTO_SIGNATURE_SCHEME_NAME = meshpay-monocypher-4.0.2-ed25519-closed`
+- `CRYPTO_SIGNATURE_RFC8032_COMPATIBLE = 0`
+
+Ce profil est un format ferme Mesh Pay pour prototype homogene. Il ne doit pas
+etre presente comme compatible Ed25519/RFC8032 avec des stacks externes.
+
 ## Points d'attention
 
 - **Ne pas confondre `crypto_eddsa_*` (BLAKE2b) et `crypto_ed25519_*`

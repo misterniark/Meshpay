@@ -1,14 +1,15 @@
 /**
  * @file crypto_keys.c
- * @brief Implémentation de la gestion des clés Ed25519 via Monocypher.
+ * @brief Implémentation de la gestion des clés Mesh Pay via Monocypher.
  *
  * Depuis le Lot E.2 (mai 2026) : remplace l'ancienne implémentation PSA
  * Crypto de mbedTLS, qui ne fournissait pas de driver Ed25519 dans IDF
  * v5.4.3 (`psa_generate_key` retournait PSA_ERROR_NOT_SUPPORTED = -134).
  *
  * Monocypher 4.0.2 est vendoré dans `vendor/monocypher/` et fournit
- * l'API `crypto_ed25519_*` utilisée par Mesh Pay. La randomness vient
- * du TRNG matériel ESP32 via `esp_fill_random()`.
+ * l'API `crypto_ed25519_*` utilisée par Mesh Pay. Ce profil est ferme
+ * Mesh Pay / Monocypher 4.0.2 et non garanti interoperable RFC8032.
+ * La randomness vient du TRNG matériel ESP32 via `esp_fill_random()`.
  *
  * Format de la clé privée stockée : `seed[32] || public[32]` = 64 octets.
  * C'est le format `secret_key[64]` natif de Monocypher.
@@ -75,7 +76,7 @@ esp_err_t crypto_generate_keypair(keypair_t *keypair)
      */
     crypto_wipe(seed, sizeof(seed));
 
-    ESP_LOGD(TAG, "Keypair Ed25519 generee (32B seed -> 64B secret + 32B public)");
+    ESP_LOGD(TAG, "Keypair Mesh Pay generee (32B seed -> 64B secret + 32B public)");
     return ESP_OK;
 }
 

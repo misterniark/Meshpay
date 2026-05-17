@@ -130,6 +130,44 @@ static bool tx_id_already_collected(const transaction_t *txs,
     return false;
 }
 
+static int compare_tx_page_order(const transaction_t *a,
+                                 const transaction_t *b)
+{
+    if (a->timestamp < b->timestamp) return -1;
+    if (a->timestamp > b->timestamp) return 1;
+    return memcmp(a->id.bytes, b->id.bytes, sizeof(a->id.bytes));
+}
+
+static void insert_lora_sync_candidate(transaction_t *out_buf,
+                                       uint32_t *written,
+                                       uint32_t max_count,
+                                       const transaction_t *tx)
+{
+    if (!out_buf || !written || !tx || max_count == 0 ||
+        tx_id_already_collected(out_buf, *written, &tx->id)) {
+        return;
+    }
+
+    if (*written == max_count &&
+        compare_tx_page_order(tx, &out_buf[max_count - 1]) >= 0) {
+        return;
+    }
+
+    uint32_t pos = 0;
+    while (pos < *written && compare_tx_page_order(&out_buf[pos], tx) <= 0) {
+        pos++;
+    }
+
+    uint32_t limit = (*written < max_count) ? *written : max_count - 1;
+    for (uint32_t i = limit; i > pos; i--) {
+        out_buf[i] = out_buf[i - 1];
+    }
+    out_buf[pos] = *tx;
+    if (*written < max_count) {
+        (*written)++;
+    }
+}
+
 /**
  * Callback de collecte des TX a diffuser via LoRa.
  *
@@ -151,7 +189,6 @@ static uint32_t lora_collect_confirmed_txs(uint64_t       since_ts,
         return 0;
     }
 
-    uint64_t newest  = since_ts;
     uint32_t written = 0;
 
     /*
@@ -161,20 +198,18 @@ static uint32_t lora_collect_confirmed_txs(uint64_t       since_ts,
      */
     if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         ESP_LOGW(TAG, "Sync LoRa : mutex indisponible, cycle saute");
-        *out_newest_ts = newest;
+        *out_newest_ts = since_ts;
         return 0;
     }
 
 #if CONFIG_MESHPAY_TEST_DEVICE_SEED
     transaction_t seed_tx;
     if (test_device_seed_get_tx(&seed_tx)) {
-        memcpy(&out_buf[written], &seed_tx, sizeof(transaction_t));
-        if (seed_tx.timestamp > newest) newest = seed_tx.timestamp;
-        written++;
+        insert_lora_sync_candidate(out_buf, &written, max_count, &seed_tx);
     }
 #endif
 
-    for (uint32_t i = 0; i < s_dag.count && written < max_count; i++) {
+    for (uint32_t i = 0; i < s_dag.count; i++) {
         const transaction_t *tx = &s_dag.transactions[i];
         if (tx->status == TX_STATUS_CONFIRMED && tx->timestamp > since_ts) {
 #if CONFIG_MESHPAY_TEST_DEVICE_SEED
@@ -182,9 +217,7 @@ static uint32_t lora_collect_confirmed_txs(uint64_t       since_ts,
                 continue;
             }
 #endif
-            memcpy(&out_buf[written], tx, sizeof(transaction_t));
-            if (tx->timestamp > newest) newest = tx->timestamp;
-            written++;
+            insert_lora_sync_candidate(out_buf, &written, max_count, tx);
         }
     }
 
@@ -197,30 +230,29 @@ static uint32_t lora_collect_confirmed_txs(uint64_t       since_ts,
      * LoRa post-reboot : sans cette passe, un device redemarre ne propage
      * plus ses confirmations recentes.
      */
-    if (written < max_count) {
+    {
         transaction_t *recent =
             (transaction_t *)malloc(sizeof(transaction_t) * max_count);
         if (recent != NULL) {
             uint32_t recent_count = 0;
             if (ledger_tx_window_read_recent(recent, max_count,
                                              &recent_count) == ESP_OK) {
-                for (uint32_t i = 0; i < recent_count && written < max_count; i++) {
+                for (uint32_t i = 0; i < recent_count; i++) {
                     const transaction_t *tx = &recent[i];
                     if (tx->status != TX_STATUS_CONFIRMED ||
-                        tx->timestamp <= since_ts ||
-                        tx_id_already_collected(out_buf, written, &tx->id)) {
+                        tx->timestamp <= since_ts) {
                         continue;
                     }
-                    memcpy(&out_buf[written], tx, sizeof(transaction_t));
-                    if (tx->timestamp > newest) newest = tx->timestamp;
-                    written++;
+                    insert_lora_sync_candidate(out_buf, &written, max_count, tx);
                 }
             }
             free(recent);
         }
     }
 
-    *out_newest_ts = newest;
+    *out_newest_ts = (written > 0 && out_buf[written - 1].timestamp > since_ts)
+                         ? out_buf[written - 1].timestamp
+                         : since_ts;
     return written;
 }
 

@@ -35,6 +35,7 @@
 #include "esp_random.h"        /* esp_random() : source d'aléa hardware */
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "freertos/task.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -55,6 +56,7 @@
 #define LORA_SYNC_BOOT_CATCHUP_MAX_MS 5000U
 #define LORA_SYNC_MAX_TX_PER_CYCLE 8U
 #define LORA_SYNC_MAX_ATTEST_PER_CYCLE COMM_MSG_DAG_ATTEST_BATCH_MAX
+#define LORA_SYNC_REQUEST_RETRY_MIN_MS 5000U
 
 static const char *TAG = "lora_sync";
 
@@ -76,6 +78,11 @@ static lora_frag_ctx_t s_frag_ctx;
  * entrer en collision (timeout de réassemblage : 10 s).
  */
 static uint8_t s_lora_tx_seq_id = 0;
+
+static public_key_t s_last_request_target;
+static uint64_t     s_last_request_since = 0;
+static TickType_t   s_last_request_tick = 0;
+static bool         s_last_request_valid = false;
 
 /** Spinlock protégeant l'acces concurrent a s_frag_ctx [H8] */
 static portMUX_TYPE s_frag_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -118,6 +125,31 @@ static void lora_sync_send_one_tx(const lora_sync_config_t *config,
                                   const transaction_t *tx,
                                   uint32_t index, uint32_t total);
 
+static int compare_tx_page_order(const transaction_t *a,
+                                 const transaction_t *b)
+{
+    if (a->timestamp < b->timestamp) return -1;
+    if (a->timestamp > b->timestamp) return 1;
+    return memcmp(a->id.bytes, b->id.bytes, CRYPTO_HASH_SIZE);
+}
+
+static void sort_tx_page(transaction_t *txs, uint32_t count)
+{
+    if (!txs || count < 2) {
+        return;
+    }
+
+    for (uint32_t i = 1; i < count; i++) {
+        transaction_t cur = txs[i];
+        uint32_t j = i;
+        while (j > 0 && compare_tx_page_order(&cur, &txs[j - 1]) < 0) {
+            txs[j] = txs[j - 1];
+            j--;
+        }
+        txs[j] = cur;
+    }
+}
+
 static void write_u16_be(uint8_t *dst, uint16_t val)
 {
     dst[0] = (uint8_t)(val >> 8);
@@ -136,6 +168,28 @@ static bool lora_is_own_key(const lora_sync_config_t *config,
 {
     return config && config->own_pubkey && key &&
            public_key_equal(config->own_pubkey, key);
+}
+
+static bool lora_should_send_dag_request(const public_key_t *target,
+                                         uint64_t since_ts)
+{
+    if (!target) {
+        return false;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+    if (s_last_request_valid &&
+        s_last_request_since == since_ts &&
+        public_key_equal(&s_last_request_target, target) &&
+        (now - s_last_request_tick) < pdMS_TO_TICKS(LORA_SYNC_REQUEST_RETRY_MIN_MS)) {
+        return false;
+    }
+
+    s_last_request_target = *target;
+    s_last_request_since = since_ts;
+    s_last_request_tick = now;
+    s_last_request_valid = true;
+    return true;
 }
 
 static esp_err_t sign_dag_summary(const lora_sync_config_t *config,
@@ -740,9 +794,21 @@ void lora_sync_handle_rx(const lora_sync_config_t *config,
         }
 
         if (summary.last_tx_timestamp > local.last_tx_timestamp) {
-            uint64_t since = local.last_tx_timestamp;
-            (void)lora_send_dag_request(config, &summary.node_key,
-                                        since, LORA_SYNC_MAX_TX_PER_CYCLE);
+            /*
+             * Reculer d'1 ms rend la reprise idempotente en cas de TX
+             * differentes partageant le meme timestamp local. Les doublons
+             * eventuels sont dedupes plus bas par le merge DAG.
+             */
+            uint64_t since = (local.last_tx_timestamp > 0)
+                                 ? local.last_tx_timestamp - 1
+                                 : 0;
+            if (lora_should_send_dag_request(&summary.node_key, since)) {
+                (void)lora_send_dag_request(config, &summary.node_key,
+                                            since, LORA_SYNC_MAX_TX_PER_CYCLE);
+            } else {
+                ESP_LOGD(TAG, "DAG_REQUEST deja emise recemment (since=%llu)",
+                         (unsigned long long)since);
+            }
             ESP_LOGI(TAG, "DAG_SUMMARY plus recent recu (peer=%02x, last=%llu > local=%llu)",
                      summary.node_key.bytes[0],
                      (unsigned long long)summary.last_tx_timestamp,
@@ -789,12 +855,22 @@ void lora_sync_handle_rx(const lora_sync_config_t *config,
                                                           max_count,
                                                           &newest_ts,
                                                           config->collect_ctx);
+        sort_tx_page(txs, tx_count);
         ESP_LOGI(TAG, "DAG_REQUEST recu (since=%llu) : %lu TX a renvoyer",
                  (unsigned long long)req.since_timestamp,
                  (unsigned long)tx_count);
         for (uint32_t i = 0; i < tx_count; i++) {
             lora_sync_send_one_tx(config, &txs[i], i, tx_count);
         }
+        /*
+         * Resume/ACK de sync sans nouveau type wire : apres une page, le
+         * repondeur republie son etat courant. Si le demandeur reste en
+         * retard, il redemandera la page suivante avec un curseur avance ;
+         * si un paquet a ete perdu, il redemandera une page deja vue, ce
+         * qui reste idempotent.
+         */
+        lora_send_attestation_batch(config);
+        (void)lora_send_dag_summary(config);
         free(txs);
         break;
     }
@@ -1087,6 +1163,7 @@ void lora_sync_do_cycle(const lora_sync_config_t *config,
                                                        LORA_SYNC_MAX_TX_PER_CYCLE,
                                                        &newest_ts,
                                                        config->collect_ctx);
+    sort_tx_page(tx_to_send, tx_count);
 
     /*
      * Phase 2 : envoyer les TX via LoRa (sans mutex).

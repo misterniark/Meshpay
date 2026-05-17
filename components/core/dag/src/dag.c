@@ -120,6 +120,10 @@ esp_err_t dag_get_tips_ext(const dag_t *dag, const transaction_t **tips,
      * c'est ~62 750 comparaisons, négligeable (< 1 ms sur ESP32).
      */
     for (uint32_t i = 0; i < dag->count; i++) {
+        if (dag->transactions[i].status == TX_STATUS_CANCELLED) {
+            continue;
+        }
+
         bool is_tip = true;
         const hash_t *candidate_id = &dag->transactions[i].id;
 
@@ -127,6 +131,9 @@ esp_err_t dag_get_tips_ext(const dag_t *dag, const transaction_t **tips,
         for (uint32_t j = 0; j < dag->count; j++) {
             if (i == j) continue;
 
+            if (dag->transactions[j].status == TX_STATUS_CANCELLED) {
+                continue;
+            }
             for (uint8_t p = 0; p < dag->transactions[j].parent_count; p++) {
                 if (hash_equal(candidate_id, &dag->transactions[j].parents[p])) {
                     is_tip = false;

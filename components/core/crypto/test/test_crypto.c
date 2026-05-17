@@ -3,12 +3,14 @@
  * @brief Tests unitaires pour le module core/crypto/.
  *
  * Teste la génération de clés, le hachage SHA-256, la signature
- * et la vérification Ed25519. Utilise le framework Unity (inclus ESP-IDF).
+ * et la vérification du profil de signature Mesh Pay. Utilise le framework
+ * Unity (inclus ESP-IDF).
  */
 
 #include "unity.h"
 #include "crypto/crypto_keys.h"
 #include "crypto/crypto_hash.h"
+#include "crypto/crypto_profile.h"
 #include "crypto/crypto_sign.h"
 #include "monocypher-ed25519.h"
 #include <string.h>
@@ -16,6 +18,16 @@
 /* ========================================================================= */
 /*                         Tests crypto_hash                                  */
 /* ========================================================================= */
+
+TEST_CASE("crypto_profile_monocypher_closed_not_rfc8032", "[crypto]")
+{
+    TEST_ASSERT_EQUAL_UINT32(1, CRYPTO_SIGNATURE_WIRE_VERSION);
+    TEST_ASSERT_EQUAL_STRING("meshpay-monocypher-4.0.2-ed25519-closed",
+                             CRYPTO_SIGNATURE_SCHEME_NAME);
+    TEST_ASSERT_EQUAL_STRING("Monocypher 4.0.2 crypto_ed25519_*",
+                             CRYPTO_SIGNATURE_PROVIDER_NAME);
+    TEST_ASSERT_EQUAL_UINT32(0, CRYPTO_SIGNATURE_RFC8032_COMPATIBLE);
+}
 
 /**
  * @brief Vérifie que le hash SHA-256 d'une chaîne connue est correct.
@@ -91,7 +103,7 @@ TEST_CASE("hash_sha256_parametres_null", "[crypto]")
 /* ========================================================================= */
 
 /**
- * @brief Vérifie qu'on peut générer une paire de clés Ed25519 valide.
+ * @brief Vérifie qu'on peut générer une paire de clés Mesh Pay valide.
  *
  * Après génération, la clé publique et la clé privée ne doivent pas
  * être des buffers nuls.

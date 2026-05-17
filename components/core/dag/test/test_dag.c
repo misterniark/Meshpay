@@ -15,6 +15,7 @@
 #include "transaction/tx_validate.h"
 #include "crypto/crypto_keys.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* ========================================================================= */
 /*                         Helpers de test                                    */
@@ -482,8 +483,10 @@ TEST_CASE("dag_merge_parents_manquants", "[dag]")
  *
  * Deux TX MINT distinctes (timestamps et amounts differents → id
  * different) emises par le MEME master avec le MEME seq doivent etre
- * detectees comme un conflit. La premiere est acceptee, la deuxieme
- * est rejetee avec DAG_MERGE_CONFLICT.
+ * detectees comme un conflit. Elles sont conservees toutes les deux,
+ * mais une seule reste comptable : le plus petit tx_id gagne, l'autre
+ * est marquee CANCELLED. Cette regle remplace "first seen wins" par
+ * une convergence deterministe.
  */
 TEST_CASE("dag_merge_conflit_seq_meme_from", "[dag]")
 {
@@ -518,8 +521,110 @@ TEST_CASE("dag_merge_conflit_seq_meme_from", "[dag]")
     TEST_ASSERT_EQUAL(ESP_OK, dag_merge_transaction(&dag, &tx2, &master_keys, &r2));
     TEST_ASSERT_EQUAL(DAG_MERGE_CONFLICT, r2);
 
-    /* Le DAG ne doit contenir que la premiere TX */
-    TEST_ASSERT_EQUAL(1, dag_count(&dag));
+    TEST_ASSERT_EQUAL(2, dag_count(&dag));
+    const transaction_t *stored1 = dag_get_by_id(&dag, &tx1.id);
+    const transaction_t *stored2 = dag_get_by_id(&dag, &tx2.id);
+    TEST_ASSERT_NOT_NULL(stored1);
+    TEST_ASSERT_NOT_NULL(stored2);
+
+    const bool tx1_wins = memcmp(tx1.id.bytes, tx2.id.bytes,
+                                 CRYPTO_HASH_SIZE) < 0;
+    TEST_ASSERT_EQUAL(tx1_wins ? TX_STATUS_CONFIRMED : TX_STATUS_CANCELLED,
+                      stored1->status);
+    TEST_ASSERT_EQUAL(tx1_wins ? TX_STATUS_CANCELLED : TX_STATUS_CONFIRMED,
+                      stored2->status);
+}
+
+TEST_CASE("dag_merge_conflit_seq_converge_meme_si_ordre_inverse", "[dag]")
+{
+    dag_t *dag_ab = (dag_t *)malloc(sizeof(*dag_ab));
+    dag_t *dag_ba = (dag_t *)malloc(sizeof(*dag_ba));
+    TEST_ASSERT_NOT_NULL(dag_ab);
+    TEST_ASSERT_NOT_NULL(dag_ba);
+    dag_init(dag_ab);
+    dag_init(dag_ba);
+
+    keypair_t master, user;
+    crypto_generate_keypair(&master);
+    crypto_generate_keypair(&user);
+
+    hash_t parent;
+    make_hash(&parent, 0x55);
+
+    const public_key_t master_key_list[] = { master.public_key };
+    master_keys_t master_keys = { .keys = master_key_list, .count = 1 };
+
+    transaction_t tx_a;
+    transaction_t tx_b;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        tx_create_mint(&tx_a, &master, &user.public_key,
+                       100, 0, 8, &parent, 1, 1000));
+    TEST_ASSERT_EQUAL(ESP_OK,
+        tx_create_mint(&tx_b, &master, &user.public_key,
+                       200, 0, 8, &parent, 1, 2000));
+
+    dag_merge_result_t r;
+    TEST_ASSERT_EQUAL(ESP_OK, dag_merge_transaction(dag_ab, &tx_a, &master_keys, &r));
+    TEST_ASSERT_EQUAL(ESP_OK, dag_merge_transaction(dag_ab, &tx_b, &master_keys, &r));
+    TEST_ASSERT_EQUAL(ESP_OK, dag_merge_transaction(dag_ba, &tx_b, &master_keys, &r));
+    TEST_ASSERT_EQUAL(ESP_OK, dag_merge_transaction(dag_ba, &tx_a, &master_keys, &r));
+
+    const bool a_wins = memcmp(tx_a.id.bytes, tx_b.id.bytes,
+                               CRYPTO_HASH_SIZE) < 0;
+    const transaction_t *ab_a = dag_get_by_id(dag_ab, &tx_a.id);
+    const transaction_t *ab_b = dag_get_by_id(dag_ab, &tx_b.id);
+    const transaction_t *ba_a = dag_get_by_id(dag_ba, &tx_a.id);
+    const transaction_t *ba_b = dag_get_by_id(dag_ba, &tx_b.id);
+    TEST_ASSERT_NOT_NULL(ab_a);
+    TEST_ASSERT_NOT_NULL(ab_b);
+    TEST_ASSERT_NOT_NULL(ba_a);
+    TEST_ASSERT_NOT_NULL(ba_b);
+
+    TEST_ASSERT_EQUAL(a_wins ? TX_STATUS_CONFIRMED : TX_STATUS_CANCELLED,
+                      ab_a->status);
+    TEST_ASSERT_EQUAL(a_wins ? TX_STATUS_CANCELLED : TX_STATUS_CONFIRMED,
+                      ab_b->status);
+    TEST_ASSERT_EQUAL(ab_a->status, ba_a->status);
+    TEST_ASSERT_EQUAL(ab_b->status, ba_b->status);
+
+    free(dag_ab);
+    free(dag_ba);
+}
+
+TEST_CASE("dag_tips_ignore_branches_cancelled_by_conflict_resolution", "[dag]")
+{
+    dag_t dag;
+    dag_init(&dag);
+
+    keypair_t master, user;
+    crypto_generate_keypair(&master);
+    crypto_generate_keypair(&user);
+
+    hash_t parent;
+    make_hash(&parent, 0x66);
+
+    const public_key_t master_key_list[] = { master.public_key };
+    master_keys_t master_keys = { .keys = master_key_list, .count = 1 };
+
+    transaction_t tx_a;
+    transaction_t tx_b;
+    TEST_ASSERT_EQUAL(ESP_OK,
+        tx_create_mint(&tx_a, &master, &user.public_key,
+                       100, 0, 9, &parent, 1, 1000));
+    TEST_ASSERT_EQUAL(ESP_OK,
+        tx_create_mint(&tx_b, &master, &user.public_key,
+                       200, 0, 9, &parent, 1, 2000));
+
+    dag_merge_result_t r;
+    TEST_ASSERT_EQUAL(ESP_OK, dag_merge_transaction(&dag, &tx_a, &master_keys, &r));
+    TEST_ASSERT_EQUAL(ESP_OK, dag_merge_transaction(&dag, &tx_b, &master_keys, &r));
+
+    const transaction_t *tips[2] = {0};
+    uint32_t tip_count = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, dag_get_tips(&dag, tips, 2, &tip_count));
+    TEST_ASSERT_EQUAL_UINT32(1, tip_count);
+    TEST_ASSERT_NOT_NULL(tips[0]);
+    TEST_ASSERT_NOT_EQUAL(TX_STATUS_CANCELLED, tips[0]->status);
 }
 
 /**

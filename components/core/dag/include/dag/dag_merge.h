@@ -21,7 +21,7 @@
 typedef enum {
     DAG_MERGE_INSERTED = 0,  /**< Transaction nouvelle, insérée avec succès */
     DAG_MERGE_DUPLICATE = 1, /**< Transaction déjà présente, ignorée */
-    DAG_MERGE_CONFLICT = 2,  /**< Conflit détecté (même émetteur, même parents, montants différents) */
+    DAG_MERGE_CONFLICT = 2,  /**< Conflit (from, seq) resolu par ordre canonique tx_id */
     DAG_MERGE_REJECTED = 3,  /**< Transaction rejetée (DAG plein ou invalide) */
 } dag_merge_result_t;
 
@@ -31,6 +31,9 @@ typedef enum {
  * Comportement :
  * - Si la transaction existe déjà (même hash) → DUPLICATE (ignorée)
  * - Si c'est une nouvelle transaction valide → INSERTED
+ * - Si une autre TX valide existe avec le même `(from, seq)`, les devices
+ *   résolvent le conflit de manière déterministe : le plus petit `tx_id`
+ *   gagne, les autres branches sont conservées en `CANCELLED`.
  * - Si le DAG est plein → REJECTED
  *
  * Les parents manquants ne sont PAS bloquants : la transaction

@@ -316,8 +316,10 @@ static void dag_integrity_log(const char *context)
             }
             if (public_key_equal(&tx->from, &other->from) &&
                 tx->seq == other->seq &&
-                !hash_equal(&tx->id, &other->id)) {
-                ESP_LOGE(TAG, "DAG integrity[%s]: conflit seq tx[%"PRIu32"] tx[%"PRIu32"] seq=%"PRIu32,
+                !hash_equal(&tx->id, &other->id) &&
+                tx->status != TX_STATUS_CANCELLED &&
+                other->status != TX_STATUS_CANCELLED) {
+                ESP_LOGE(TAG, "DAG integrity[%s]: conflit seq actif tx[%"PRIu32"] tx[%"PRIu32"] seq=%"PRIu32,
                          context, i, j, tx->seq);
                 errors++;
             }

@@ -18,6 +18,7 @@ if(project_name STREQUAL "meshpay_test_app")
     list(APPEND lora_sync_srcs "test/test_lora_frag.c")
     list(APPEND lora_sync_srcs "test/test_lora_tx_packetize.c")
     list(APPEND lora_sync_srcs "test/test_lora_sync_jitter.c")
+    list(APPEND lora_sync_srcs "test/test_lora_sync_recovery.c")
     idf_component_register(
         SRCS ${lora_sync_srcs}
         INCLUDE_DIRS "include"

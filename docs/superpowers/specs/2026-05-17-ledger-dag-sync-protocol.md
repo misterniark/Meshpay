@@ -81,6 +81,32 @@ Invariant:
   resultat si elle est recue plusieurs fois;
 - une attestation valide ne peut jamais ressusciter une TX `CANCELLED`.
 
+## Resolution des branches concurrentes
+
+Deux TX differentes avec le meme couple `(from, seq)` representent une
+equivocation de l'emetteur. Elles peuvent etre toutes les deux valides
+cryptographiquement et arriver dans des ordres differents selon les devices.
+
+Politique locale:
+
+1. verifier structure, hash, signature et autorite MINT si necessaire;
+2. detecter les TX deja presentes avec le meme `(from, seq)`;
+3. choisir comme gagnante canonique la TX dont `tx_id` est le plus petit en
+   ordre lexicographique;
+4. conserver les branches perdantes en `CANCELLED`;
+5. ne comptabiliser que la gagnante non annulee;
+6. exclure les branches `CANCELLED` des tips actifs de `DAG_SUMMARY`.
+
+Invariant:
+
+- deux devices qui voient le meme ensemble de branches conflictuelles doivent
+  converger vers le meme gagnant, quel que soit l'ordre de reception;
+- une branche perdante reste presente pour audit/dedup/replay, mais ne doit pas
+  affecter le solde;
+- ce mecanisme corrige la convergence de la fenetre DAG recente. Il ne remplace
+  pas encore une preuve de checkpoint historique pour un device revenu apres une
+  tres longue absence si le conflit a deja ete consolide puis prune ailleurs.
+
 ## Synchronisation LoRa
 
 Chaque cycle envoie:
@@ -88,13 +114,32 @@ Chaque cycle envoie:
 1. `DAG_SUMMARY` signe: checkpoint timestamp, dernier timestamp TX, count fenetre,
    tips recentes.
 2. Si le peer annonce un etat plus recent: `DAG_REQUEST` signe.
-3. Le peer repond avec des TX recentes et des attestations recentes.
+3. Le peer repond avec une page bornee de TX confirmees, triee par
+   `(timestamp, tx_id)`, puis republie un `DAG_SUMMARY` signe comme accusé
+   d'etat/reprise.
+4. Si le demandeur reste en retard, le summary suivant declenche une nouvelle
+   request avec le curseur avance. Si un paquet a ete perdu, la meme plage peut
+   etre redemandee sans effet de bord.
+
+Pagination:
+
+- `DAG_REQUEST.since_timestamp` est le curseur de reprise;
+- `DAG_REQUEST.max_count` borne la page radio;
+- le collecteur doit choisir les plus anciennes TX confirmees avec
+  `timestamp > since_timestamp`, pas "les premieres trouvees" dans l'ordre
+  interne du DAG;
+- a la reception d'un summary plus recent, le demandeur recule le curseur local
+  d'1 ms pour tolerer plusieurs TX avec le meme timestamp. Les doublons sont
+  attendus et dedupes par `dag_merge_transaction`.
+- une meme request `(peer, since)` est throttlee pendant 5 s pour eviter une
+  boucle radio immediate si le summary de fin de reponse arrive avant que la
+  core task ait integre les TX, ou si la page demandee est temporairement vide.
 
 Invariant:
 
 - tous les messages de controle DAG sont signes par l'emetteur;
 - une request ciblee doit etre ignoree par les autres peers;
-- une reponse doit etre bornee et paginable;
+- une reponse doit etre bornee, paginable et deterministe;
 - recevoir les memes TX/attestations plusieurs fois doit etre sans effet.
 
 ## Persistance et coupure d'alimentation
@@ -137,12 +182,17 @@ Phase E1: double-slot durable pour checkpoint, fenetre TX et attestations.
 
 Phase E2: tests de coupure simulee sur les blobs ledger.
 
-Phase E3: pagination de `DAG_REQUEST` avec curseur ou plages temporelles.
+Phase E3: pagination de `DAG_REQUEST` avec curseur temporel — realisee pour la
+fenetre recente: page deterministe, recouvrement de 1 ms, summary de fin de
+reponse comme ACK d'etat.
 
 Phase E4: tests de convergence multi-device avec pertes, doublons, ordre aleatoire
 et reboot au milieu d'une transaction. Un premier socle existe dans
 `test_tx_lifecycle_chaos.c` pour les transitions locales; il reste a ajouter
-des tests bout-en-bout lora_sync + ledger durable.
+des tests bout-en-bout lora_sync + ledger durable. La resolution deterministe
+des conflits `(from, seq)` est couverte dans `test_dag.c`.
 
-Phase E5: decision crypto definitive: soit Monocypher 4.0.2 comme format ferme,
-soit migration vers une signature Ed25519 RFC8032 validee par vecteurs officiels.
+Phase E5: decision crypto court terme realisee dans
+`2026-05-17-crypto-signature-profile.md`: Monocypher 4.0.2 est documente
+comme profil ferme Mesh Pay, non annonce RFC8032. Une migration vers une
+signature Ed25519 RFC8032 standard reste requise pour un systeme ouvert.

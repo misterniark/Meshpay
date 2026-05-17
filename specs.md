@@ -188,8 +188,8 @@ Device A (payeur)                    Device B (receveur)
 
 ### 4.8 Cryptographie & stockage des clés
 
-- **Identité** : paire de clés Ed25519 par device (générée au premier démarrage via PSA Crypto)
-- **Initialisation** : `crypto_init()` centralise l'init de PSA Crypto avec mutex FreeRTOS (appelée une seule fois au boot)
+- **Identité** : paire de clés du profil Mesh Pay par device (`meshpay-monocypher-4.0.2-ed25519-closed`, non annoncé RFC8032)
+- **Initialisation** : `crypto_init()` garde l'invariant d'init unique ; Monocypher 4.0.2 n'a pas d'état global
 - **Signature** : chaque transaction est signée par l'émetteur (TRANSFER et MINT)
 - **Vérification MINT** : la signature est vérifiée avec `tx->from`, puis la clé est validée contre `mint_authorities`
 - **Hash** : SHA-256 pour les identifiants de transactions
@@ -264,7 +264,7 @@ project/
 │   ├── core/                 # Logique métier
 │   │   ├── dag/              # Structure DAG, validation, élagage
 │   │   ├── wallet/           # Gestion solde, verrouillage, checkpoints
-│   │   ├── crypto/           # Ed25519, SHA-256, gestion des clés, crypto_init (PSA)
+│   │   ├── crypto/           # Profil signature Mesh Pay, SHA-256, gestion des clés
 │   │   └── transaction/      # Création, sérialisation CBOR, statuts
 │   │
 │   ├── comm/                 # Communications
@@ -664,4 +664,3 @@ Le système supporte deux form factors avec adaptation automatique de l'UI :
   - Vérifier la signature du manifeste au boot ; rejeter s'il ne matche pas la root key connue
   - Gérer la mise à jour du manifeste (ex. ajout d'un nouveau mint_authority) via re-signature + version incrémentée
   - **Fallback actuel** : init hardcoded, marqué "prototype / dev" — à remplacer avant tout déploiement terrain
-

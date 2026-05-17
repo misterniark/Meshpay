@@ -3,7 +3,9 @@
  * @brief Types fondamentaux pour la cryptographie du système de paiement.
  *
  * Définit les tailles des clés, signatures et hashes utilisés dans tout
- * le système. Ed25519 est utilisé pour les signatures, SHA-256 pour les hashes.
+ * le système. Les signatures utilisent le profil wire documenté dans
+ * crypto_profile.h ; le profil actuel est fermé Mesh Pay / Monocypher 4.0.2
+ * et ne doit pas être vendu comme interopérable RFC8032.
  */
 
 #ifndef CRYPTO_TYPES_H
@@ -13,20 +15,20 @@
 #include <stdbool.h>
 #include <string.h>
 
-/** Taille d'une clé publique Ed25519 en octets */
+/** Taille d'une clé publique du profil de signature Mesh Pay en octets */
 #define CRYPTO_PUBLIC_KEY_SIZE  32
 
-/** Taille d'une clé privée Ed25519 en octets (seed 32 + public 32) */
+/** Taille d'une clé privée en octets (seed 32 + public 32) */
 #define CRYPTO_PRIVATE_KEY_SIZE 64
 
-/** Taille d'une signature Ed25519 en octets */
+/** Taille d'une signature du profil Mesh Pay en octets */
 #define CRYPTO_SIGNATURE_SIZE  64
 
 /** Taille d'un hash SHA-256 en octets */
 #define CRYPTO_HASH_SIZE       32
 
 /**
- * @brief Clé publique Ed25519.
+ * @brief Clé publique du profil de signature Mesh Pay.
  *
  * Utilisée comme identifiant unique de chaque device dans le réseau.
  * C'est aussi l'adresse de destination/source dans les transactions.
@@ -36,7 +38,7 @@ typedef struct {
 } public_key_t;
 
 /**
- * @brief Paire de clés Ed25519 (publique + privée).
+ * @brief Paire de clés du profil de signature Mesh Pay (publique + privée).
  *
  * Générée une seule fois au premier démarrage du device,
  * puis stockée dans le NVS chiffré.
@@ -47,7 +49,7 @@ typedef struct {
 } keypair_t;
 
 /**
- * @brief Signature Ed25519 (64 octets).
+ * @brief Signature du profil Mesh Pay (64 octets).
  *
  * Chaque transaction est signée par l'émetteur pour garantir
  * l'authenticité et l'intégrité.
